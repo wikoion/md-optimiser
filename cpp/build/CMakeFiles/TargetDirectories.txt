@@ -1,3 +1,0 @@
-/Users/richarddraycott/git/md-optimiser/cpp/build/CMakeFiles/optimiser.dir
-/Users/richarddraycott/git/md-optimiser/cpp/build/CMakeFiles/edit_cache.dir
-/Users/richarddraycott/git/md-optimiser/cpp/build/CMakeFiles/rebuild_cache.dir

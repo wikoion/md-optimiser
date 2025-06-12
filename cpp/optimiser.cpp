@@ -28,9 +28,24 @@ struct Pod {
     double memory;
 };
 
+enum SolverStatus {
+    UNKNOWN = 0,
+    MODEL_INVALID = 1,
+    FEASIBLE = 2,
+    INFEASIBLE = 3,
+    OPTIMAL = 4
+};
+
+struct SolverResult {
+    bool success;
+    double objective;
+    int status_code;
+    double solve_time_secs;
+};
+
 // C-callable optimization entry point
 __attribute__((visibility("default")))
-void OptimisePlacement(
+SolverResult OptimisePlacement(
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
@@ -39,6 +54,8 @@ void OptimisePlacement(
     int* out_assignments,
     int* out_nodes_used
 ) {
+    SolverResult result;
+
     // Create the constraint programming model
     sat::CpModelBuilder model;
 
@@ -104,11 +121,16 @@ void OptimisePlacement(
     // Solve the model
     const sat::CpSolverResponse response = sat::Solve(model.Build());
 
+    result.status_code = static_cast<int>(response.status());
+    result.success = response.status() == sat::CpSolverStatus::OPTIMAL ||
+                     response.status() == sat::CpSolverStatus::FEASIBLE;
+    result.solve_time_secs = response.wall_time();
+    result.objective = response.objective_value();
+
     // If the solver found no feasible solution, report and exit
-    if (response.status() != sat::CpSolverStatus::OPTIMAL &&
-        response.status() != sat::CpSolverStatus::FEASIBLE) {
+    if (!result.success) {
         std::cerr << "No solution found.\n";
-        return;
+        return result;
     }
 
     // Extract the pod-to-deployment assignments from the solution
@@ -126,6 +148,8 @@ void OptimisePlacement(
         int used = static_cast<int>(sat::SolutionIntegerValue(response, nodes_used[j]));
         out_nodes_used[j] = used;
     }
+
+    return result;
 }
 
 } // extern "C"

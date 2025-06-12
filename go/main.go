@@ -22,9 +22,18 @@ func main() {
 		{"md-m-general", 24, 96, 4},
 		{"md-n-c7i", 64, 128, 3},
 		{"md-o-balanced", 48, 96, 3},
+		{"md-o-m6id", 48, 96, 3},
 	}
 
-	pods := []Pod{}
+	pods := []Pod{
+		{
+			CPU:    5,
+			Memory: 11,
+			Labels: map[string]string{
+				"workload-type": "nvme",
+			},
+		},
+	}
 	for i := 0; i < 50; i++ {
 		pods = append(pods, Pod{
 			CPU:    float64(2 + (i % 4)),        // 2–5 cores

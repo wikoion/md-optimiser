@@ -23,6 +23,7 @@ void OptimisePlacement(
     const Pod* pods, int num_pods,
     const double* plugin_scores,
 	const int* allowed_matrix,
+	const int* initial_assignment,
     int* out_assignments,
     int* out_nodes_used
 );
@@ -175,11 +176,44 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 	outNodes := (*C.int)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outNodes))
 
+	// Greedy initial assignment: [podIndex] = mdIndex
+	initialAssignment := make([]int, len(pods))
+	mdCPU := make([]float64, len(mds))
+	mdMem := make([]float64, len(mds))
+
+	for i, pod := range pods {
+		assigned := false
+		allowed := getAllowedMDs(pod, mds)
+		for _, j := range allowed {
+			// Try to fit pod in an existing "open" node
+			if mdCPU[j]+pod.CPU <= float64(mds[j].MaxScaleOut)*mds[j].CPU &&
+				mdMem[j]+pod.Memory <= float64(mds[j].MaxScaleOut)*mds[j].Memory {
+				initialAssignment[i] = j
+				mdCPU[j] += pod.CPU
+				mdMem[j] += pod.Memory
+				assigned = true
+				break
+			}
+		}
+		if !assigned {
+			// fallback: assign to first allowed
+			initialAssignment[i] = allowed[0]
+		}
+	}
+
+	cHints := (*C.int)(C.malloc(C.size_t(len(initialAssignment)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	defer C.free(unsafe.Pointer(cHints))
+	goHints := (*[1 << 30]C.int)(unsafe.Pointer(cHints))[:len(initialAssignment):len(initialAssignment)]
+	for i, h := range initialAssignment {
+		goHints[i] = C.int(h)
+	}
+
 	C.OptimisePlacement(
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores,
 		cAllowed,
+		cHints, // ← New initial assignment hint
 		outAssign,
 		outNodes,
 	)

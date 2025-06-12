@@ -1,6 +1,7 @@
+// optimiser.go
 //go:generate make -C ..
 
-package main
+package md_solver
 
 /*
 #cgo LDFLAGS: -L. -loptimiser
@@ -18,21 +19,26 @@ typedef struct {
     double memory;
 } Pod;
 
-void OptimisePlacement(
+typedef struct {
+    _Bool success;
+    double objective;
+    int status_code;
+    double solve_time_secs;
+} SolverResult;
+
+SolverResult OptimisePlacement(
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
-	const int* allowed_matrix,
+    const int* allowed_matrix,
+    const int* initial_assignment,
     int* out_assignments,
     int* out_nodes_used
 );
 */
 import "C"
-
 import (
-	"math"
-	"regexp"
-	"strings"
+	"fmt"
 	"unsafe"
 )
 
@@ -46,100 +52,27 @@ type MachineDeployment struct {
 type Pod struct {
 	CPU    float64
 	Memory float64
-	Labels map[string]string
 }
 
-type ScoringPlugin interface {
-	Name() string
-	Weight() float64
-	Score(md MachineDeployment, pods []Pod) float64
+type Result struct {
+	Assignments   []int
+	NodesUsed     []int
+	Succeeded     bool
+	Objective     float64
+	SolverStatus  int
+	SolveTimeSecs float64
+	Message       string
 }
 
-type RegexMatchPlugin struct {
-	weight  float64
-	pattern *regexp.Regexp
-}
-
-func (p *RegexMatchPlugin) Name() string    { return "RegexMatch" }
-func (p *RegexMatchPlugin) Weight() float64 { return p.weight }
-func (p *RegexMatchPlugin) Score(md MachineDeployment, _ []Pod) float64 {
-	if p.pattern.MatchString(md.Name) {
-		return 1.0
-	} else {
-		return 0.0
-	}
-}
-
-type FewestNodesPlugin struct{ weight float64 }
-
-func (p *FewestNodesPlugin) Name() string                                   { return "FewestNodes" }
-func (p *FewestNodesPlugin) Weight() float64                                { return p.weight }
-func (p *FewestNodesPlugin) Score(md MachineDeployment, pods []Pod) float64 { return 1.0 }
-
-type LeastWastePlugin struct{ weight float64 }
-
-func (p *LeastWastePlugin) Name() string    { return "LeastWaste" }
-func (p *LeastWastePlugin) Weight() float64 { return p.weight }
-func (p *LeastWastePlugin) Score(md MachineDeployment, pods []Pod) float64 {
-	var totalCPU, totalMem float64
-	for _, pod := range pods {
-		totalCPU += pod.CPU
-		totalMem += pod.Memory
-	}
-	wasteCPU := math.Max(0, md.CPU-totalCPU)
-	wasteMem := math.Max(0, md.Memory-totalMem)
-	return (wasteCPU + wasteMem) / (md.CPU + md.Memory)
-}
-
-func getAllowedMDs(pod Pod, mds []MachineDeployment) []int {
-	// This is just a placeholder to validate the label filtering
-	if pod.Labels["workload-type"] == "nvme" {
-		var allowed []int
-		for i, md := range mds {
-			if strings.Contains(md.Name, "m6id") {
-				allowed = append(allowed, i)
-			}
-		}
-		return allowed
-	}
-	// default: allow all
-	allowed := make([]int, len(mds))
-	for i := range mds {
-		allowed[i] = i
-	}
-	return allowed
-}
-
-func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]int, []int) {
+func OptimisePlacementRaw(
+	mds []MachineDeployment,
+	pods []Pod,
+	pluginScores []float64,
+	allowedMatrix []int,
+	initialAssignment []int,
+) Result {
 	numMDs := len(mds)
 	numPods := len(pods)
-
-	scores := make([]float64, numMDs)
-	for i, md := range mds {
-		for _, plugin := range plugins {
-			scores[i] += plugin.Weight() * plugin.Score(md, pods)
-		}
-	}
-
-	allowed := make([][]bool, len(pods)) // [pod][md]
-	for i, pod := range pods {
-		allowed[i] = make([]bool, len(mds))
-		allowedMDs := getAllowedMDs(pod, mds)
-		for _, j := range allowedMDs {
-			allowed[i][j] = true
-		}
-	}
-
-	flat := make([]C.int, len(pods)*len(mds))
-	for i := range pods {
-		for j := range mds {
-			if allowed[i][j] {
-				flat[i*len(mds)+j] = 1
-			} else {
-				flat[i*len(mds)+j] = 0
-			}
-		}
-	}
 
 	cMDs := make([]C.MachineDeployment, numMDs)
 	cNames := make([]*C.char, numMDs)
@@ -152,22 +85,36 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 			max_scale_out: C.int(md.MaxScaleOut),
 		}
 	}
+	defer func() {
+		for _, cstr := range cNames {
+			C.free(unsafe.Pointer(cstr))
+		}
+	}()
 
 	cPods := make([]C.Pod, numPods)
 	for i, p := range pods {
 		cPods[i] = C.Pod{cpu: C.double(p.CPU), memory: C.double(p.Memory)}
 	}
 
-	cAllowed := (*C.int)(C.malloc(C.size_t(len(flat)) * C.size_t(unsafe.Sizeof(C.int(0)))))
-	defer C.free(unsafe.Pointer(cAllowed))
-	goAllowed := (*[1 << 30]C.int)(unsafe.Pointer(cAllowed))[:len(flat):len(flat)]
-	copy(goAllowed, flat)
-
-	cScores := (*C.double)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.double(0)))))
+	cScores := (*C.double)(C.malloc(C.size_t(len(pluginScores)) * C.size_t(unsafe.Sizeof(C.double(0)))))
 	defer C.free(unsafe.Pointer(cScores))
-	goScores := (*[1 << 30]C.double)(unsafe.Pointer(cScores))[:numMDs:numMDs]
-	for i := range scores {
-		goScores[i] = C.double(scores[i])
+	goScores := (*[1 << 30]C.double)(unsafe.Pointer(cScores))[:len(pluginScores):len(pluginScores)]
+	for i, s := range pluginScores {
+		goScores[i] = C.double(s)
+	}
+
+	cAllowed := (*C.int)(C.malloc(C.size_t(len(allowedMatrix)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	defer C.free(unsafe.Pointer(cAllowed))
+	goAllowed := (*[1 << 30]C.int)(unsafe.Pointer(cAllowed))[:len(allowedMatrix):len(allowedMatrix)]
+	for i, val := range allowedMatrix {
+		goAllowed[i] = C.int(val)
+	}
+
+	cHints := (*C.int)(C.malloc(C.size_t(len(initialAssignment)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	defer C.free(unsafe.Pointer(cHints))
+	goHints := (*[1 << 30]C.int)(unsafe.Pointer(cHints))[:len(initialAssignment):len(initialAssignment)]
+	for i, h := range initialAssignment {
+		goHints[i] = C.int(h)
 	}
 
 	outAssign := (*C.int)(C.malloc(C.size_t(numPods) * C.size_t(unsafe.Sizeof(C.int(0)))))
@@ -175,29 +122,37 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 	outNodes := (*C.int)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outNodes))
 
-	C.OptimisePlacement(
+	res := C.OptimisePlacement(
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
-		cScores,
-		cAllowed,
-		outAssign,
-		outNodes,
+		cScores, cAllowed, cHints, outAssign, outNodes,
 	)
 
-	assignments := make([]int, numPods)
-	nodesUsed := make([]int, numMDs)
+	result := Result{
+		Succeeded:     bool(res.success),
+		Objective:     float64(res.objective),
+		SolverStatus:  int(res.status_code),
+		SolveTimeSecs: float64(res.solve_time_secs),
+		Assignments:   make([]int, numPods),
+		NodesUsed:     make([]int, numMDs),
+		Message:       "",
+	}
+
+	if !result.Succeeded {
+		result.Message = fmt.Sprintf("Solver failed with status code %d", result.SolverStatus)
+		return result
+	}
+
 	goAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[:numPods:numPods]
 	goNodes := (*[1 << 30]C.int)(unsafe.Pointer(outNodes))[:numMDs:numMDs]
+
 	for i := 0; i < numPods; i++ {
-		assignments[i] = int(goAssign[i])
+		result.Assignments[i] = int(goAssign[i])
 	}
 	for i := 0; i < numMDs; i++ {
-		nodesUsed[i] = int(goNodes[i])
+		result.NodesUsed[i] = int(goNodes[i])
 	}
 
-	for _, cstr := range cNames {
-		C.free(unsafe.Pointer(cstr))
-	}
-
-	return assignments, nodesUsed
+	result.Message = "Optimisation successful"
+	return result
 }

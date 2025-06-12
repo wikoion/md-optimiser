@@ -22,6 +22,7 @@ void OptimisePlacement(
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
+	const int* allowed_matrix,
     int* out_assignments,
     int* out_nodes_used
 );
@@ -31,6 +32,7 @@ import "C"
 import (
 	"math"
 	"regexp"
+	"strings"
 	"unsafe"
 )
 
@@ -44,6 +46,7 @@ type MachineDeployment struct {
 type Pod struct {
 	CPU    float64
 	Memory float64
+	Labels map[string]string
 }
 
 type ScoringPlugin interface {
@@ -88,6 +91,25 @@ func (p *LeastWastePlugin) Score(md MachineDeployment, pods []Pod) float64 {
 	return (wasteCPU + wasteMem) / (md.CPU + md.Memory)
 }
 
+func getAllowedMDs(pod Pod, mds []MachineDeployment) []int {
+	// This is just a placeholder to validate the label filtering
+	if pod.Labels["workload-type"] == "nvme" {
+		var allowed []int
+		for i, md := range mds {
+			if strings.Contains(md.Name, "m6id") {
+				allowed = append(allowed, i)
+			}
+		}
+		return allowed
+	}
+	// default: allow all
+	allowed := make([]int, len(mds))
+	for i := range mds {
+		allowed[i] = i
+	}
+	return allowed
+}
+
 func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]int, []int) {
 	numMDs := len(mds)
 	numPods := len(pods)
@@ -96,6 +118,26 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 	for i, md := range mds {
 		for _, plugin := range plugins {
 			scores[i] += plugin.Weight() * plugin.Score(md, pods)
+		}
+	}
+
+	allowed := make([][]bool, len(pods)) // [pod][md]
+	for i, pod := range pods {
+		allowed[i] = make([]bool, len(mds))
+		allowedMDs := getAllowedMDs(pod, mds)
+		for _, j := range allowedMDs {
+			allowed[i][j] = true
+		}
+	}
+
+	flat := make([]C.int, len(pods)*len(mds))
+	for i := range pods {
+		for j := range mds {
+			if allowed[i][j] {
+				flat[i*len(mds)+j] = 1
+			} else {
+				flat[i*len(mds)+j] = 0
+			}
 		}
 	}
 
@@ -116,6 +158,11 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 		cPods[i] = C.Pod{cpu: C.double(p.CPU), memory: C.double(p.Memory)}
 	}
 
+	cAllowed := (*C.int)(C.malloc(C.size_t(len(flat)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	defer C.free(unsafe.Pointer(cAllowed))
+	goAllowed := (*[1 << 30]C.int)(unsafe.Pointer(cAllowed))[:len(flat):len(flat)]
+	copy(goAllowed, flat)
+
 	cScores := (*C.double)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.double(0)))))
 	defer C.free(unsafe.Pointer(cScores))
 	goScores := (*[1 << 30]C.double)(unsafe.Pointer(cScores))[:numMDs:numMDs]
@@ -132,6 +179,7 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores,
+		cAllowed,
 		outAssign,
 		outNodes,
 	)

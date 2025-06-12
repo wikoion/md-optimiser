@@ -30,6 +30,7 @@ void OptimisePlacement(
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
+    const int* allowed_matrix,
     int* out_assignments,
     int* out_nodes_used
 ) {
@@ -39,6 +40,9 @@ void OptimisePlacement(
     for (int i = 0; i < num_pods; ++i) {
         for (int j = 0; j < num_mds; ++j) {
             x[i][j] = model.NewBoolVar();
+            if (!allowed_matrix[i * num_mds + j]) {
+                model.AddEquality(x[i][j], 0);
+            }
         }
     }
 

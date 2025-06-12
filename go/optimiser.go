@@ -22,8 +22,8 @@ void OptimisePlacement(
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
-	const int* allowed_matrix,
-	const int* initial_assignment,
+    const int* allowed_matrix,
+    const int* initial_assignment,
     int* out_assignments,
     int* out_nodes_used
 );
@@ -33,6 +33,7 @@ import "C"
 import (
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"unsafe"
 )
@@ -66,9 +67,8 @@ func (p *RegexMatchPlugin) Weight() float64 { return p.weight }
 func (p *RegexMatchPlugin) Score(md MachineDeployment, _ []Pod) float64 {
 	if p.pattern.MatchString(md.Name) {
 		return 1.0
-	} else {
-		return 0.0
 	}
+	return 0.0
 }
 
 type FewestNodesPlugin struct{ weight float64 }
@@ -93,22 +93,29 @@ func (p *LeastWastePlugin) Score(md MachineDeployment, pods []Pod) float64 {
 }
 
 func getAllowedMDs(pod Pod, mds []MachineDeployment) []int {
-	// This is just a placeholder to validate the label filtering
-	if pod.Labels["workload-type"] == "nvme" {
-		var allowed []int
-		for i, md := range mds {
+	var allowed []int
+	for i, md := range mds {
+		if pod.CPU > md.CPU || pod.Memory > md.Memory {
+			continue
+		}
+		if pod.Labels["workload-type"] == "nvme" {
 			if strings.Contains(md.Name, "m6id") {
 				allowed = append(allowed, i)
 			}
+			continue
 		}
-		return allowed
-	}
-	// default: allow all
-	allowed := make([]int, len(mds))
-	for i := range mds {
-		allowed[i] = i
+		allowed = append(allowed, i)
 	}
 	return allowed
+}
+
+func contains(slice []int, v int) bool {
+	for _, x := range slice {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]int, []int) {
@@ -122,7 +129,7 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 		}
 	}
 
-	allowed := make([][]bool, len(pods)) // [pod][md]
+	allowed := make([][]bool, len(pods))
 	for i, pod := range pods {
 		allowed[i] = make([]bool, len(mds))
 		allowedMDs := getAllowedMDs(pod, mds)
@@ -176,16 +183,45 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 	outNodes := (*C.int)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outNodes))
 
-	// Greedy initial assignment: [podIndex] = mdIndex
+	type podWithIndex struct {
+		index int
+		cpu   float64
+		mem   float64
+	}
+	var sortedPods []podWithIndex
+	for i, p := range pods {
+		sortedPods = append(sortedPods, podWithIndex{i, p.CPU, p.Memory})
+	}
+	sort.Slice(sortedPods, func(i, j int) bool {
+		return (sortedPods[i].cpu + sortedPods[i].mem) > (sortedPods[j].cpu + sortedPods[j].mem)
+	})
+
+	type mdWithScore struct {
+		index int
+		score float64
+	}
+	var mdScores []mdWithScore
+	for i, score := range scores {
+		mdScores = append(mdScores, mdWithScore{i, score})
+	}
+	sort.Slice(mdScores, func(i, j int) bool {
+		return mdScores[i].score > mdScores[j].score
+	})
+
 	initialAssignment := make([]int, len(pods))
 	mdCPU := make([]float64, len(mds))
 	mdMem := make([]float64, len(mds))
 
-	for i, pod := range pods {
+	for _, podInfo := range sortedPods {
+		i := podInfo.index
+		pod := pods[i]
 		assigned := false
-		allowed := getAllowedMDs(pod, mds)
-		for _, j := range allowed {
-			// Try to fit pod in an existing "open" node
+		allowedMDs := getAllowedMDs(pod, mds)
+		for _, md := range mdScores {
+			j := md.index
+			if !contains(allowedMDs, j) {
+				continue
+			}
 			if mdCPU[j]+pod.CPU <= float64(mds[j].MaxScaleOut)*mds[j].CPU &&
 				mdMem[j]+pod.Memory <= float64(mds[j].MaxScaleOut)*mds[j].Memory {
 				initialAssignment[i] = j
@@ -195,9 +231,8 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 				break
 			}
 		}
-		if !assigned {
-			// fallback: assign to first allowed
-			initialAssignment[i] = allowed[0]
+		if !assigned && len(allowedMDs) > 0 {
+			initialAssignment[i] = allowedMDs[0]
 		}
 	}
 
@@ -213,7 +248,7 @@ func Optimise(mds []MachineDeployment, pods []Pod, plugins []ScoringPlugin) ([]i
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores,
 		cAllowed,
-		cHints, // ← New initial assignment hint
+		cHints,
 		outAssign,
 		outNodes,
 	)

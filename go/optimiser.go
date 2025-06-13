@@ -4,7 +4,6 @@
 package md_solver
 
 /*
-#cgo LDFLAGS: -L. -loptimiser
 #include <stdlib.h>
 
 // C struct definition mirroring the ones in optimiser.cpp

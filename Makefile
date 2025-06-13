@@ -1,16 +1,28 @@
-.PHONY: all build clean test
+.PHONY: all build clean
 
-CPP_DIR = cpp
-GO_DIR = go
+CPP_DIR := cpp
+GO_DIR := go
+BUILD_DIR := $(CPP_DIR)/build
+
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Linux)
+    LIB_FILES := liboptimiser.so
+else ifeq ($(UNAME_S),Darwin)
+    LIB_FILES := liboptimiser.dylib liboptimiser.so
+else ifeq ($(OS),Windows_NT)
+    LIB_FILES := optimiser.dll
+else
+    $(error Unsupported OS: $(UNAME_S))
+endif
 
 all: build
 
 build:
-	mkdir -p $(CPP_DIR)/build
-	cd $(CPP_DIR)/build && cmake .. && make
-	cp $(CPP_DIR)/build/liboptimiser.dylib $(GO_DIR)/
+	mkdir -p $(BUILD_DIR)
+	cd $(BUILD_DIR) && cmake .. && make
+	cp $(addprefix $(BUILD_DIR)/, $(LIB_FILES)) $(GO_DIR)/
 
 clean:
-	rm -rf $(CPP_DIR)/build
-	rm -f $(GO_DIR)/liboptimiser.dylib
-
+	rm -rf $(BUILD_DIR)
+	rm -f $(addprefix $(GO_DIR)/, $(LIB_FILES))

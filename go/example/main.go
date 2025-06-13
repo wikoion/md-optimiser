@@ -1,38 +1,3 @@
-// ========================================================================================
-// MD Solver
-// ========================================================================================
-// This Go programme acts as a frontend to a custom OR-Tools-based C++ solver for scheduling
-// pods (workloads) onto MachineDeployments (instance types). It demonstrates:
-//
-//   - Pluggable scoring via a flexible plugin interface
-//   - Deterministic workload and instance pool generation for benchmarking
-//   - Conversion of domain objects (Pods, MachineDeployments) to flat C-friendly structs
-//   - Scoring normalisation to influence the solver's weighted objective
-//   - Optional initial assignment hints to accelerate solving
-//   - Solver post-processing including detailed waste calculation
-//
-// ========================================================================================
-// Usage Notes:
-//
-// • Plugins:
-//   - Plugins compute per-MD scores; higher is better.
-//   - These are linearly combined and normalised to affect C++ penalty weights.
-//   - If all plugin scores are nearly equal, their influence on optimisation will be minimal.
-//   - Example plugins included: FewestNodes, LeastWaste, RegexMatch.
-//
-// • Hints:
-//   - A greedy first-fit bin-packing algorithm is used to create an initial assignment.
-//   - This hint is optional but improves convergence and solution quality.
-//
-// • Constraints:
-//   - Resource feasibility and label-based filtering are enforced in `computeAllowedMatrix()`.
-//   - e.g., NVMe pods are restricted to m6id deployments only.
-//
-// • Waste Metrics:
-//   - After solving, total unutilised CPU and memory across all MDs are reported.
-//   - Helps evaluate trade-offs between cost, resource efficiency, and plugin behaviour.
-// ========================================================================================
-
 package main
 
 import (
@@ -47,31 +12,31 @@ import (
 )
 
 // Pod represents a container workload with resource demands and labels.
-// Labels are used for placement constraints (e.g., requiring a certain hardware class).
+// Labels may be used to apply placement constraints like hardware preferences.
 type Pod struct {
-	CPU    float64           // CPU cores requested
-	Memory float64           // Memory in GiB requested
-	Labels map[string]string // e.g. {"workload-type": "nvme"}
+	CPU    float64           // CPU cores requested (e.g., 2.0 = 2 full cores)
+	Memory float64           // Memory requested in GiB
+	Labels map[string]string // Optional label constraints, e.g., {"workload-type": "nvme"}
 }
 
-// ScoringPlugin allows custom pluggable scoring of MDs for a given workload profile.
-// Higher scores indicate more desirable MDs; weights indicate relative importance.
+// ScoringPlugin defines an interface for pluggable MD scoring logic.
+// Plugins return a score per MD and are weighted to express relative priority.
 type ScoringPlugin interface {
 	Name() string
 	Weight() float64
 	Score(md md_solver.MachineDeployment, stats PodStats) float64
 }
 
-// PodStats provides summary statistics across all pods to avoid repeated aggregation.
-// Plugins use this instead of raw pods for performance.
+// PodStats summarizes the demand characteristics of a workload set.
+// Plugins consume this instead of individual pods for efficiency.
 type PodStats struct {
 	TotalCPU, TotalMem float64
 	AvgCPU, AvgMem     float64
 	Count              int
 }
 
-// calculatePodStats returns totals and averages from a slice of pods.
-// If no pods exist, zeroes are returned and downstream scoring plugins will fallback.
+// calculatePodStats computes the total and average resource demand for a set of pods.
+// This is used to inform scoring plugins.
 func calculatePodStats(pods []Pod) PodStats {
 	var totalCPU, totalMem float64
 	for _, p := range pods {
@@ -91,26 +56,22 @@ func calculatePodStats(pods []Pod) PodStats {
 	}
 }
 
-// FewestNodesPlugin scores MDs based on how many average pods fit per node.
-// A high score means fewer nodes are likely needed, favoring dense packing.
-// Caveat: May lead to more wasted resources if pod shapes mismatch MD shapes.
+// FewestNodesPlugin scores MDs that require fewer nodes to satisfy total demand.
+// It promotes dense packing but may increase fragmentation/waste.
 type FewestNodesPlugin struct{ weight float64 }
 
 func (p *FewestNodesPlugin) Name() string    { return "FewestNodes" }
 func (p *FewestNodesPlugin) Weight() float64 { return p.weight }
-
-// Estimate based on real total demand
 func (p *FewestNodesPlugin) Score(md md_solver.MachineDeployment, stats PodStats) float64 {
 	if stats.Count == 0 {
 		return 0
 	}
 	nodesNeeded := math.Max(stats.TotalCPU/md.CPU, stats.TotalMem/md.Memory)
-	return 1.0 / nodesNeeded // Lower nodes needed = higher score
+	return 1.0 / nodesNeeded
 }
 
-// LeastWastePlugin favors MDs that closely match aggregate resource demand.
-// Waste is calculated as unused provisioned resources. Higher score = less waste.
-// This can conflict with FewestNodes if minimizing waste means spreading over more nodes.
+// LeastWastePlugin scores MDs by how closely they match aggregate resource demand.
+// It penalizes overprovisioned combinations (i.e., high unused capacity).
 type LeastWastePlugin struct{ weight float64 }
 
 func (p *LeastWastePlugin) Name() string    { return "LeastWaste" }
@@ -130,8 +91,9 @@ func (p *LeastWastePlugin) Score(md md_solver.MachineDeployment, stats PodStats)
 	return 1.0 - wasteRatio
 }
 
-// RegexMatchPlugin scores MDs based on regex name match. Used for expressing preferences
-// for instance families (e.g., favoring c7i nodes). Should be used cautiously in general-purpose packing.
+// RegexMatchPlugin scores MDs that match a name pattern.
+// This can be used to express preferences (e.g., certain instance families).
+// Should be used sparingly to avoid overfitting scoring.
 type RegexMatchPlugin struct {
 	weight  float64
 	pattern *regexp.Regexp
@@ -146,23 +108,18 @@ func (p *RegexMatchPlugin) Score(md md_solver.MachineDeployment, _ PodStats) flo
 	return 0.0
 }
 
+// generateMDs returns a representative set of test MachineDeployments.
+// Shapes vary to create tradeoffs in waste, density, and label compatibility.
 func generateMDs() []md_solver.MachineDeployment {
-	// Generates a fixed set of 50 MDs with diverse shapes to expose solver tradeoffs.
-	// Includes both CPU-heavy, memory-heavy, and balanced shapes.
 	var mds []md_solver.MachineDeployment
 	shapes := []struct {
 		cpu   float64
 		mem   float64
 		scale int
 	}{
-		{16, 64, 3},  // balanced small
-		{24, 96, 4},  // balanced medium
-		{32, 128, 5}, // balanced large
-		{48, 96, 5},  // CPU-heavy
-		{24, 192, 5}, // memory-heavy
-		{64, 256, 7}, // high-end
-		{16, 32, 3},  // very CPU-heavy
-		{8, 128, 3},  // very memory-heavy
+		{16, 64, 3}, {24, 96, 4}, {32, 128, 5},
+		{48, 96, 5}, {24, 192, 5}, {64, 256, 7},
+		{16, 32, 3}, {8, 128, 3},
 	}
 	baseTypes := []string{"c7i", "general", "burst", "balanced", "mixed", "lowcost", "m6id"}
 	for i := 0; i < 50; i++ {
@@ -179,23 +136,13 @@ func generateMDs() []md_solver.MachineDeployment {
 	return mds
 }
 
+// generatePods returns a synthetic workload with a mix of pod shapes and optional constraints.
 func generatePods() []Pod {
-	// Generates a reproducible set of pods with a variety of shapes to increase packing ambiguity.
-	// This promotes tradeoffs between waste and density when optimising.
 	pods := []Pod{{CPU: 5, Memory: 11, Labels: map[string]string{"workload-type": "nvme"}}}
 	shapes := []struct {
 		cpu float64
 		mem float64
-	}{
-		{2, 4},  // light
-		{1, 8},  // mem-heavy
-		{4, 2},  // cpu-heavy
-		{2, 8},  // balanced
-		{3, 6},  // medium
-		{6, 12}, // medium-large
-		{8, 16}, // heavy
-		{1, 16}, // very mem-heavy
-	}
+	}{{2, 4}, {1, 8}, {4, 2}, {2, 8}, {3, 6}, {6, 12}, {8, 16}, {1, 16}}
 	for i := 0; i < 200; i++ {
 		shape := shapes[i%len(shapes)]
 		pods = append(pods, Pod{CPU: shape.cpu, Memory: shape.mem})
@@ -203,6 +150,8 @@ func generatePods() []Pod {
 	return pods
 }
 
+// computeScores applies all scoring plugins to each MD and returns a normalized score array.
+// Plugins are assumed to be pure functions and should not have side effects.
 func computeScores(mds []md_solver.MachineDeployment, stats PodStats, plugins []ScoringPlugin) []float64 {
 	s := make([]float64, len(mds))
 	for i, md := range mds {
@@ -213,6 +162,8 @@ func computeScores(mds []md_solver.MachineDeployment, stats PodStats, plugins []
 	return normalizeScores(s)
 }
 
+// normalizeScores scales the score values into [0,1] range and sharpens contrast using a power curve.
+// This makes high-signal MDs more distinguishable in greedy strategies or heuristic sorting.
 func normalizeScores(scores []float64) []float64 {
 	min, max := scores[0], scores[0]
 	for _, v := range scores {
@@ -224,26 +175,29 @@ func normalizeScores(scores []float64) []float64 {
 		}
 	}
 	if math.Abs(max-min) < 1e-6 {
-		return make([]float64, len(scores)) // Avoid flat normalization
+		return make([]float64, len(scores)) // Avoid divide-by-zero when all scores equal
 	}
 	out := make([]float64, len(scores))
 	for i, v := range scores {
 		norm := (v - min) / (max - min)
-		out[i] = math.Pow(norm, 3) // Cubic boost — spreads the tail
+		out[i] = math.Pow(norm, 3) // Boost high scores further
 	}
 	return out
 }
 
+// computeAllowedMatrix builds a binary constraint matrix for pod-to-MD compatibility.
+// A pod is allowed to run on an MD if its resource requests fit and label rules pass.
 func computeAllowedMatrix(pods []Pod, mds []md_solver.MachineDeployment) ([]int, [][]int) {
 	numPods := len(pods)
 	numMDs := len(mds)
-	flat := make([]int, numPods*numMDs)
-	allowed := make([][]int, numPods)
+	flat := make([]int, numPods*numMDs) // Linearized matrix for solver
+	allowed := make([][]int, numPods)   // Per-pod allowed MD indexes
+
 	for i, pod := range pods {
 		for j, md := range mds {
 			ok := pod.CPU <= md.CPU && pod.Memory <= md.Memory
 			if pod.Labels["workload-type"] == "nvme" {
-				ok = strings.Contains(md.Name, "m6id") // Label constraint
+				ok = strings.Contains(md.Name, "m6id")
 			}
 			idx := i*numMDs + j
 			if ok {
@@ -255,6 +209,8 @@ func computeAllowedMatrix(pods []Pod, mds []md_solver.MachineDeployment) ([]int,
 	return flat, allowed
 }
 
+// computeInitialAssignments generates a greedy seed assignment based on plugin scores.
+// Used to warm-start the SAT solver and speed up convergence.
 func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, allowed [][]int, scores []float64) []int {
 	type podIdx struct {
 		i    int
@@ -270,7 +226,7 @@ func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, al
 	mdCPU := make([]float64, len(mds))
 	mdMem := make([]float64, len(mds))
 
-	// Sort pods by descending demand
+	// Sort pods by descending total demand (to place heavy pods first)
 	podOrder := make([]podIdx, numPods)
 	for i, p := range pods {
 		podOrder[i] = podIdx{i, p.CPU, p.Memory}
@@ -279,7 +235,7 @@ func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, al
 		return podOrder[i].c+podOrder[i].m > podOrder[j].c+podOrder[j].m
 	})
 
-	// Sort MDs by descending plugin score
+	// Sort MDs by descending score
 	mdOrder := make([]mdScore, len(mds))
 	for i, s := range scores {
 		mdOrder[i] = mdScore{i, s}
@@ -288,7 +244,7 @@ func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, al
 		return mdOrder[i].s > mdOrder[j].s
 	})
 
-	// Greedy placement respecting capacity limits
+	// Assign pods greedily
 	for _, p := range podOrder {
 		for _, md := range mdOrder {
 			if !contains(allowed[p.i], md.i) {
@@ -306,6 +262,7 @@ func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, al
 	return initial
 }
 
+// convertPods converts from example-level Pod to md_solver.Pod for the C++ optimiser call.
 func convertPods(pods []Pod) []md_solver.Pod {
 	out := make([]md_solver.Pod, len(pods))
 	for i, p := range pods {
@@ -314,6 +271,7 @@ func convertPods(pods []Pod) []md_solver.Pod {
 	return out
 }
 
+// contains reports whether val appears in slice.
 func contains(slice []int, val int) bool {
 	for _, x := range slice {
 		if x == val {
@@ -323,13 +281,15 @@ func contains(slice []int, val int) bool {
 	return false
 }
 
+// main executes the full optimisation flow with example data.
+// This includes plugin-based scoring, constraint generation, warm start, and final solver execution.
 func main() {
 	mds := generateMDs()
 	pods := generatePods()
 
 	plugins := []ScoringPlugin{
-		&FewestNodesPlugin{weight: 0.3},
-		&LeastWastePlugin{weight: 0.7},
+		&FewestNodesPlugin{weight: 0.6},
+		&LeastWastePlugin{weight: 0.6},
 		&RegexMatchPlugin{weight: 0.1, pattern: regexp.MustCompile(`.*-c7i$`)},
 	}
 
@@ -365,7 +325,7 @@ func main() {
 		}
 	}
 
-	// Compute and print total resource waste (unused provisioned capacity)
+	// Report total resource waste for post-analysis or plugin tuning
 	var totalWasteCPU, totalWasteMem float64
 	mdCPUUsed := make([]float64, len(mds))
 	mdMemUsed := make([]float64, len(mds))

@@ -1,7 +1,7 @@
 // optimiser.go
-//go:generate make -C ..
+//go:generate make -C .
 
-package md_solver
+package optimiser
 
 /*
 #cgo darwin LDFLAGS: -L${SRCDIR} -loptimiser

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	md_solver "github.com/wikoion/md-optimiser"
+	optimiser "github.com/wikoion/md-optimiser"
 )
 
 type MD struct {
@@ -63,7 +63,7 @@ func (p *Pod) GetLabel(label string) string {
 type ScoringPlugin interface {
 	Name() string
 	Weight() float64
-	Score(md md_solver.MachineDeployment, stats PodStats) float64
+	Score(md optimiser.MachineDeployment, stats PodStats) float64
 }
 
 // PodStats summarizes the demand characteristics of a workload set.
@@ -76,7 +76,7 @@ type PodStats struct {
 
 // calculatePodStats computes the total and average resource demand for a set of pods.
 // This is used to inform scoring plugins.
-func calculatePodStats(pods []md_solver.Pod) PodStats {
+func calculatePodStats(pods []optimiser.Pod) PodStats {
 	var totalCPU, totalMem float64
 	for _, p := range pods {
 		totalCPU += p.GetCPU()
@@ -101,7 +101,7 @@ type FewestNodesPlugin struct{ weight float64 }
 
 func (p *FewestNodesPlugin) Name() string    { return "FewestNodes" }
 func (p *FewestNodesPlugin) Weight() float64 { return p.weight }
-func (p *FewestNodesPlugin) Score(md md_solver.MachineDeployment, stats PodStats) float64 {
+func (p *FewestNodesPlugin) Score(md optimiser.MachineDeployment, stats PodStats) float64 {
 	if stats.Count == 0 {
 		return 0
 	}
@@ -115,7 +115,7 @@ type LeastWastePlugin struct{ weight float64 }
 
 func (p *LeastWastePlugin) Name() string    { return "LeastWaste" }
 func (p *LeastWastePlugin) Weight() float64 { return p.weight }
-func (p *LeastWastePlugin) Score(md md_solver.MachineDeployment, stats PodStats) float64 {
+func (p *LeastWastePlugin) Score(md optimiser.MachineDeployment, stats PodStats) float64 {
 	if stats.Count == 0 {
 		return 0
 	}
@@ -140,7 +140,7 @@ type RegexMatchPlugin struct {
 
 func (p *RegexMatchPlugin) Name() string    { return "RegexMatch" }
 func (p *RegexMatchPlugin) Weight() float64 { return p.weight }
-func (p *RegexMatchPlugin) Score(md md_solver.MachineDeployment, _ PodStats) float64 {
+func (p *RegexMatchPlugin) Score(md optimiser.MachineDeployment, _ PodStats) float64 {
 	if p.pattern.MatchString(md.GetName()) {
 		return 1.0
 	}
@@ -149,8 +149,8 @@ func (p *RegexMatchPlugin) Score(md md_solver.MachineDeployment, _ PodStats) flo
 
 // generateMDs returns a representative set of test MachineDeployments.
 // Shapes vary to create tradeoffs in waste, density, and label compatibility.
-func generateMDs() []md_solver.MachineDeployment {
-	var mds []md_solver.MachineDeployment
+func generateMDs() []optimiser.MachineDeployment {
+	var mds []optimiser.MachineDeployment
 	shapes := []struct {
 		cpu   float64
 		mem   float64
@@ -176,9 +176,9 @@ func generateMDs() []md_solver.MachineDeployment {
 }
 
 // generatePods returns a synthetic workload with a mix of pod shapes and optional constraints.
-func generatePods() []md_solver.Pod {
+func generatePods() []optimiser.Pod {
 	nvmePod := &Pod{CPU: 5, Memory: 11, Labels: map[string]string{"workload-type": "nvme"}}
-	pods := []md_solver.Pod{nvmePod}
+	pods := []optimiser.Pod{nvmePod}
 	shapes := []struct {
 		cpu float64
 		mem float64
@@ -192,7 +192,7 @@ func generatePods() []md_solver.Pod {
 
 // computeScores applies all scoring plugins to each MD and returns a normalized score array.
 // Plugins are assumed to be pure functions and should not have side effects.
-func computeScores(mds []md_solver.MachineDeployment, stats PodStats, plugins []ScoringPlugin) []float64 {
+func computeScores(mds []optimiser.MachineDeployment, stats PodStats, plugins []ScoringPlugin) []float64 {
 	s := make([]float64, len(mds))
 	for i, md := range mds {
 		for _, p := range plugins {
@@ -227,7 +227,7 @@ func normalizeScores(scores []float64) []float64 {
 
 // computeAllowedMatrix builds a binary constraint matrix for pod-to-MD compatibility.
 // A pod is allowed to run on an MD if its resource requests fit and label rules pass.
-func computeAllowedMatrix(pods []md_solver.Pod, mds []md_solver.MachineDeployment) ([]int, [][]int) {
+func computeAllowedMatrix(pods []optimiser.Pod, mds []optimiser.MachineDeployment) ([]int, [][]int) {
 	numPods := len(pods)
 	numMDs := len(mds)
 	flat := make([]int, numPods*numMDs) // Linearized matrix for solver
@@ -251,7 +251,7 @@ func computeAllowedMatrix(pods []md_solver.Pod, mds []md_solver.MachineDeploymen
 
 // computeInitialAssignments generates a greedy seed assignment based on plugin scores.
 // Used to warm-start the SAT solver and speed up convergence.
-func computeInitialAssignments(pods []md_solver.Pod, mds []md_solver.MachineDeployment, allowed [][]int, scores []float64) []int {
+func computeInitialAssignments(pods []optimiser.Pod, mds []optimiser.MachineDeployment, allowed [][]int, scores []float64) []int {
 	type podIdx struct {
 		i    int
 		c, m float64
@@ -331,7 +331,7 @@ func main() {
 	initial := computeInitialAssignments(pods, mds, allowedMDs, scores)
 
 	start := time.Now()
-	result := md_solver.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial)
 	duration := time.Since(start)
 
 	fmt.Printf("\nResult: %s\nStatus Code: %d\nObjective: %.2f\nSolve Time: %.2fs\nDuration (Go): %s\n",

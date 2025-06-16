@@ -22,7 +22,7 @@ CGO_LDFLAGS="-Wl,-rpath,$PWD" go build
 
 ## Usage
 
-Import the module as `md_solver` and call `OptimisePlacement`. Machine Deployment and Pod interfaces
+Import the module as `github.com/wikoion/md-optimiser` and call `OptimisePlacement`. Machine Deployment and Pod interfaces
 exist to allow type flexibility. Implement your own types and pass your mds, pods and placement rules as slices. 
 Plugin scores allow expressing per‑deployment preferences (higher scores = more preferred).
 
@@ -41,11 +41,11 @@ type pod struct {
     // Do the same for pod
 }
 
-mds := []md_solver.MachineDeployment{
+mds := []optimiser.MachineDeployment{
     &md{Name: "md-a", CPU: 16, Memory: 64, MaxScaleOut: 3},
 }
 
-pods := []md_solver.Pod{
+pods := []optimiser.Pod{
     &pod{CPU: 2, Memory: 4},
 }
 
@@ -53,13 +53,13 @@ scores := []float64{1.0}              // one score per MD
 allowed := []int{1}                   // pod 0 may run on MD 0
 initial := []int{-1}                  // optional starting hint
 
-result := md_solver.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
+result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
 if result.Succeeded {
     fmt.Println("Assignments:", result.Assignments)
 }
 ```
 
-Refer to `go/example/main.go` for a more complete flow including scoring
+Refer to `example/main.go` for a more complete flow including scoring
 plugins, greedy warm start generation and reporting of resource waste.
 
 ## Running the Example

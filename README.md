@@ -27,12 +27,26 @@ exist to allow type flexibility. Implement your own types and pass your mds, pod
 Plugin scores allow expressing per‑deployment preferences (higher scores = more preferred).
 
 ```go
+type md struct {
+    Name string
+    // Your fields
+}
+
+func (m *md) GetName() string {
+    return m.Name
+}
+// Implement interface funcs: GetName(), GetCPU(), GetMemory() and GetMaxScaleOut()
+
+type pod struct {
+    // Do the same for pod
+}
+
 mds := []md_solver.MachineDeployment{
-    {Name: "md-a", CPU: 16, Memory: 64, MaxScaleOut: 3},
+    &md{Name: "md-a", CPU: 16, Memory: 64, MaxScaleOut: 3},
 }
 
 pods := []md_solver.Pod{
-    {CPU: 2, Memory: 4},
+    &pod{CPU: 2, Memory: 4},
 }
 
 scores := []float64{1.0}              // one score per MD

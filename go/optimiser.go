@@ -4,6 +4,9 @@
 package md_solver
 
 /*
+#cgo darwin LDFLAGS: -L${SRCDIR} -loptimiser
+#cgo linux LDFLAGS: -L${SRCDIR} -loptimiser -ldl
+#cgo CXXFLAGS: -std=c++17
 #include <stdlib.h>
 
 // C struct definition mirroring the ones in optimiser.cpp
@@ -48,17 +51,18 @@ import (
 // ------------------------
 
 // Defines a machine deployment in Go
-type MachineDeployment struct {
-	Name        string
-	CPU         float64
-	Memory      float64
-	MaxScaleOut int
+type MachineDeployment interface {
+	GetName() string
+	GetCPU() float64
+	GetMemory() float64
+	GetMaxScaleOut() int
 }
 
 // Represents a pod in Go
-type Pod struct {
-	CPU    float64
-	Memory float64
+type Pod interface {
+	GetCPU() float64
+	GetMemory() float64
+	GetLabel(string) string
 }
 
 // Result returned from the optimisation function
@@ -93,12 +97,12 @@ func OptimisePlacementRaw(
 	cMDs := make([]C.MachineDeployment, numMDs)
 	cNames := make([]*C.char, numMDs) // hold allocated C strings so we can free them later
 	for i, md := range mds {
-		cNames[i] = C.CString(md.Name) // convert Go string to *C.char
+		cNames[i] = C.CString(md.GetName()) // convert Go string to *C.char
 		cMDs[i] = C.MachineDeployment{
 			name:          cNames[i],
-			cpu:           C.double(md.CPU),
-			memory:        C.double(md.Memory),
-			max_scale_out: C.int(md.MaxScaleOut),
+			cpu:           C.double(md.GetCPU()),
+			memory:        C.double(md.GetMemory()),
+			max_scale_out: C.int(md.GetMaxScaleOut()),
 		}
 	}
 	// Clean up all allocated strings when done
@@ -113,7 +117,7 @@ func OptimisePlacementRaw(
 	// ---------------------------------------
 	cPods := make([]C.Pod, numPods)
 	for i, p := range pods {
-		cPods[i] = C.Pod{cpu: C.double(p.CPU), memory: C.double(p.Memory)}
+		cPods[i] = C.Pod{cpu: C.double(p.GetCPU()), memory: C.double(p.GetMemory())}
 	}
 
 	// ---------------------------------------

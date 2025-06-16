@@ -11,12 +11,51 @@ import (
 	"md_solver"
 )
 
+type MD struct {
+	Name        string
+	CPU         float64
+	Memory      float64
+	MaxScaleOut int
+}
+
+func (md *MD) GetName() string {
+	return md.Name
+}
+
+func (md *MD) GetCPU() float64 {
+	return md.CPU
+}
+
+func (md *MD) GetMemory() float64 {
+	return md.Memory
+}
+
+func (md *MD) GetMaxScaleOut() int {
+	return md.MaxScaleOut
+}
+
 // Pod represents a container workload with resource demands and labels.
 // Labels may be used to apply placement constraints like hardware preferences.
 type Pod struct {
 	CPU    float64           // CPU cores requested (e.g., 2.0 = 2 full cores)
 	Memory float64           // Memory requested in GiB
 	Labels map[string]string // Optional label constraints, e.g., {"workload-type": "nvme"}
+}
+
+func (p *Pod) GetCPU() float64 {
+	return p.CPU
+}
+
+func (p *Pod) GetMemory() float64 {
+	return p.Memory
+}
+
+func (p *Pod) GetLabel(label string) string {
+	l, ok := p.Labels[label]
+	if ok {
+		return l
+	}
+	return ""
 }
 
 // ScoringPlugin defines an interface for pluggable MD scoring logic.
@@ -37,11 +76,11 @@ type PodStats struct {
 
 // calculatePodStats computes the total and average resource demand for a set of pods.
 // This is used to inform scoring plugins.
-func calculatePodStats(pods []Pod) PodStats {
+func calculatePodStats(pods []md_solver.Pod) PodStats {
 	var totalCPU, totalMem float64
 	for _, p := range pods {
-		totalCPU += p.CPU
-		totalMem += p.Memory
+		totalCPU += p.GetCPU()
+		totalMem += p.GetMemory()
 	}
 	count := len(pods)
 	if count == 0 {
@@ -66,7 +105,7 @@ func (p *FewestNodesPlugin) Score(md md_solver.MachineDeployment, stats PodStats
 	if stats.Count == 0 {
 		return 0
 	}
-	nodesNeeded := math.Max(stats.TotalCPU/md.CPU, stats.TotalMem/md.Memory)
+	nodesNeeded := math.Max(stats.TotalCPU/md.GetCPU(), stats.TotalMem/md.GetMemory())
 	return 1.0 / nodesNeeded
 }
 
@@ -80,9 +119,9 @@ func (p *LeastWastePlugin) Score(md md_solver.MachineDeployment, stats PodStats)
 	if stats.Count == 0 {
 		return 0
 	}
-	nodesNeeded := math.Max(stats.TotalCPU/md.CPU, stats.TotalMem/md.Memory)
-	totalProvisionedCPU := math.Ceil(nodesNeeded) * md.CPU
-	totalProvisionedMem := math.Ceil(nodesNeeded) * md.Memory
+	nodesNeeded := math.Max(stats.TotalCPU/md.GetCPU(), stats.TotalMem/md.GetMemory())
+	totalProvisionedCPU := math.Ceil(nodesNeeded) * md.GetCPU()
+	totalProvisionedMem := math.Ceil(nodesNeeded) * md.GetMemory()
 
 	wasteCPU := totalProvisionedCPU - stats.TotalCPU
 	wasteMem := totalProvisionedMem - stats.TotalMem
@@ -102,7 +141,7 @@ type RegexMatchPlugin struct {
 func (p *RegexMatchPlugin) Name() string    { return "RegexMatch" }
 func (p *RegexMatchPlugin) Weight() float64 { return p.weight }
 func (p *RegexMatchPlugin) Score(md md_solver.MachineDeployment, _ PodStats) float64 {
-	if p.pattern.MatchString(md.Name) {
+	if p.pattern.MatchString(md.GetName()) {
 		return 1.0
 	}
 	return 0.0
@@ -126,7 +165,7 @@ func generateMDs() []md_solver.MachineDeployment {
 		shape := shapes[i%len(shapes)]
 		typeName := baseTypes[i%len(baseTypes)]
 		name := fmt.Sprintf("md-%02d-%s", i, typeName)
-		mds = append(mds, md_solver.MachineDeployment{
+		mds = append(mds, &MD{
 			Name:        name,
 			CPU:         shape.cpu,
 			Memory:      shape.mem,
@@ -137,15 +176,16 @@ func generateMDs() []md_solver.MachineDeployment {
 }
 
 // generatePods returns a synthetic workload with a mix of pod shapes and optional constraints.
-func generatePods() []Pod {
-	pods := []Pod{{CPU: 5, Memory: 11, Labels: map[string]string{"workload-type": "nvme"}}}
+func generatePods() []md_solver.Pod {
+	nvmePod := &Pod{CPU: 5, Memory: 11, Labels: map[string]string{"workload-type": "nvme"}}
+	pods := []md_solver.Pod{nvmePod}
 	shapes := []struct {
 		cpu float64
 		mem float64
 	}{{2, 4}, {1, 8}, {4, 2}, {2, 8}, {3, 6}, {6, 12}, {8, 16}, {1, 16}}
 	for i := 0; i < 200; i++ {
 		shape := shapes[i%len(shapes)]
-		pods = append(pods, Pod{CPU: shape.cpu, Memory: shape.mem})
+		pods = append(pods, &Pod{CPU: shape.cpu, Memory: shape.mem})
 	}
 	return pods
 }
@@ -187,7 +227,7 @@ func normalizeScores(scores []float64) []float64 {
 
 // computeAllowedMatrix builds a binary constraint matrix for pod-to-MD compatibility.
 // A pod is allowed to run on an MD if its resource requests fit and label rules pass.
-func computeAllowedMatrix(pods []Pod, mds []md_solver.MachineDeployment) ([]int, [][]int) {
+func computeAllowedMatrix(pods []md_solver.Pod, mds []md_solver.MachineDeployment) ([]int, [][]int) {
 	numPods := len(pods)
 	numMDs := len(mds)
 	flat := make([]int, numPods*numMDs) // Linearized matrix for solver
@@ -195,9 +235,9 @@ func computeAllowedMatrix(pods []Pod, mds []md_solver.MachineDeployment) ([]int,
 
 	for i, pod := range pods {
 		for j, md := range mds {
-			ok := pod.CPU <= md.CPU && pod.Memory <= md.Memory
-			if pod.Labels["workload-type"] == "nvme" {
-				ok = strings.Contains(md.Name, "m6id")
+			ok := pod.GetCPU() <= md.GetCPU() && pod.GetMemory() <= md.GetMemory()
+			if pod.GetLabel("workload-type") == "nvme" {
+				ok = ok && strings.Contains(md.GetName(), "m6id")
 			}
 			idx := i*numMDs + j
 			if ok {
@@ -211,7 +251,7 @@ func computeAllowedMatrix(pods []Pod, mds []md_solver.MachineDeployment) ([]int,
 
 // computeInitialAssignments generates a greedy seed assignment based on plugin scores.
 // Used to warm-start the SAT solver and speed up convergence.
-func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, allowed [][]int, scores []float64) []int {
+func computeInitialAssignments(pods []md_solver.Pod, mds []md_solver.MachineDeployment, allowed [][]int, scores []float64) []int {
 	type podIdx struct {
 		i    int
 		c, m float64
@@ -229,7 +269,7 @@ func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, al
 	// Sort pods by descending total demand (to place heavy pods first)
 	podOrder := make([]podIdx, numPods)
 	for i, p := range pods {
-		podOrder[i] = podIdx{i, p.CPU, p.Memory}
+		podOrder[i] = podIdx{i, p.GetCPU(), p.GetMemory()}
 	}
 	sort.Slice(podOrder, func(i, j int) bool {
 		return podOrder[i].c+podOrder[i].m > podOrder[j].c+podOrder[j].m
@@ -250,8 +290,8 @@ func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, al
 			if !contains(allowed[p.i], md.i) {
 				continue
 			}
-			if mdCPU[md.i]+p.c <= float64(mds[md.i].MaxScaleOut)*mds[md.i].CPU &&
-				mdMem[md.i]+p.m <= float64(mds[md.i].MaxScaleOut)*mds[md.i].Memory {
+			if mdCPU[md.i]+p.c <= float64(mds[md.i].GetMaxScaleOut())*mds[md.i].GetCPU() &&
+				mdMem[md.i]+p.m <= float64(mds[md.i].GetMaxScaleOut())*mds[md.i].GetMemory() {
 				initial[p.i] = md.i
 				mdCPU[md.i] += p.c
 				mdMem[md.i] += p.m
@@ -260,15 +300,6 @@ func computeInitialAssignments(pods []Pod, mds []md_solver.MachineDeployment, al
 		}
 	}
 	return initial
-}
-
-// convertPods converts from example-level Pod to md_solver.Pod for the C++ optimiser call.
-func convertPods(pods []Pod) []md_solver.Pod {
-	out := make([]md_solver.Pod, len(pods))
-	for i, p := range pods {
-		out[i] = md_solver.Pod{CPU: p.CPU, Memory: p.Memory}
-	}
-	return out
 }
 
 // contains reports whether val appears in slice.
@@ -300,7 +331,7 @@ func main() {
 	initial := computeInitialAssignments(pods, mds, allowedMDs, scores)
 
 	start := time.Now()
-	result := md_solver.OptimisePlacementRaw(mds, convertPods(pods), scores, allowedMatrix, initial)
+	result := md_solver.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial)
 	duration := time.Since(start)
 
 	fmt.Printf("\nResult: %s\nStatus Code: %d\nObjective: %.2f\nSolve Time: %.2fs\nDuration (Go): %s\n",
@@ -321,7 +352,7 @@ func main() {
 	fmt.Printf("\nTotal Nodes: %d, Nodes used:\n", totalNodes)
 	for i, n := range result.NodesUsed {
 		if n > 0 {
-			fmt.Printf("%s → %d nodes\n", mds[i].Name, n)
+			fmt.Printf("%s → %d nodes\n", mds[i].GetName(), n)
 		}
 	}
 
@@ -332,16 +363,16 @@ func main() {
 
 	for i, podIdx := range result.Assignments {
 		p := pods[i]
-		mdCPUUsed[podIdx] += p.CPU
-		mdMemUsed[podIdx] += p.Memory
+		mdCPUUsed[podIdx] += p.GetCPU()
+		mdMemUsed[podIdx] += p.GetMemory()
 	}
 
 	for i, used := range result.NodesUsed {
 		if used == 0 {
 			continue
 		}
-		provisionedCPU := float64(used) * mds[i].CPU
-		provisionedMem := float64(used) * mds[i].Memory
+		provisionedCPU := float64(used) * mds[i].GetCPU()
+		provisionedMem := float64(used) * mds[i].GetMemory()
 
 		wasteCPU := provisionedCPU - mdCPUUsed[i]
 		wasteMem := provisionedMem - mdMemUsed[i]

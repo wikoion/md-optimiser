@@ -1,0 +1,30 @@
+FROM debian:bookworm
+
+# Install system tools
+RUN apt-get update && \
+    apt-get install -y cmake g++ curl tar zlib1g-dev libbz2-dev libabsl-dev make unzip
+
+# Install Protobuf 31.1 (precompiled tarball)
+RUN curl -fLO https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protobuf-31.1.tar.gz && \
+    mkdir -p /opt/protobuf && \
+    tar -xzf protobuf-31.1.tar.gz -C /opt/protobuf --strip-components=1 && \
+    rm protobuf-31.1.tar.gz
+
+ENV CMAKE_PREFIX_PATH=/opt/protobuf:/opt/ortools
+ENV CPLUS_INCLUDE_PATH=/opt/protobuf/include:/opt/ortools/include
+ENV LIBRARY_PATH=/opt/protobuf/lib:/opt/ortools/lib
+ENV LD_LIBRARY_PATH=/opt/protobuf/lib:/opt/ortools/lib
+
+# Install OR-Tools v9.13
+RUN curl -L -o ortools.tar.gz https://github.com/google/or-tools/releases/download/v9.13/or-tools_amd64_debian-12_cpp_v9.13.4784.tar.gz && \
+    mkdir -p /opt/ortools && \
+    tar -xzf ortools.tar.gz -C /opt/ortools --strip-components=1 && \
+    rm ortools.tar.gz
+
+# Environment for build + CMake detection
+ENV CMAKE_PREFIX_PATH=/opt/protobuf:/opt/ortools
+ENV CPLUS_INCLUDE_PATH=/opt/ortools/include:/opt/protobuf/include
+ENV LIBRARY_PATH=/opt/ortools/lib:/opt/protobuf/lib
+ENV LD_LIBRARY_PATH=/opt/ortools/lib:/opt/protobuf/lib
+
+WORKDIR /src

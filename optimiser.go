@@ -1,12 +1,12 @@
 // optimiser.go
-//go:generate make -C .
+//go:generate make build
 
 package optimiser
 
 /*
-#cgo darwin LDFLAGS: -L${SRCDIR} -loptimiser
-#cgo linux LDFLAGS: -L${SRCDIR} -loptimiser -ldl
-#cgo CXXFLAGS: -std=c++17
+#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib -Wl,-rpath,${SRCDIR}/lib -loptimiser_darwin_arm64
+#cgo linux,amd64  LDFLAGS: -L${SRCDIR}/lib -loptimiser_linux_amd64
+#include <dlfcn.h>
 #include <stdlib.h>
 
 // C struct definition mirroring the ones in optimiser.cpp
@@ -88,6 +88,10 @@ func OptimisePlacementRaw(
 	allowedMatrix []int,
 	initialAssignment []int,
 ) Result {
+	if err := extractAndLoadSharedLibrary(); err != nil {
+		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
+	}
+
 	numMDs := len(mds)
 	numPods := len(pods)
 

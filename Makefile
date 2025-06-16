@@ -1,28 +1,19 @@
-.PHONY: all build clean
-
-CPP_DIR := cpp
-GO_DIR := .
-BUILD_DIR := $(CPP_DIR)/build
-
-UNAME_S := $(shell uname -s)
-
-ifeq ($(UNAME_S),Linux)
-    LIB_FILES := liboptimiser.so
-else ifeq ($(UNAME_S),Darwin)
-    LIB_FILES := liboptimiser.dylib liboptimiser.so
-else ifeq ($(OS),Windows_NT)
-    LIB_FILES := optimiser.dll
-else
-    $(error Unsupported OS: $(UNAME_S))
-endif
-
 all: build
 
 build:
-	mkdir -p $(BUILD_DIR)
-	cd $(BUILD_DIR) && cmake .. && make
-	cp $(addprefix $(BUILD_DIR)/, $(LIB_FILES)) $(GO_DIR)/
+	@mkdir -p cpp/build lib
+	cd cpp/build && cmake .. && make
+
+	# macOS ARM
+	@if [ -f cpp/build/liboptimiser.dylib ]; then \
+	  install_name_tool -id @rpath/liboptimiser_darwin_arm64.dylib cpp/build/liboptimiser.dylib; \
+	  cp cpp/build/liboptimiser.dylib lib/liboptimiser_darwin_arm64.dylib; \
+	fi
+
+	# Linux x86_64
+	@if [ -f cpp/build/liboptimiser.so ]; then \
+	  cp cpp/build/liboptimiser.so lib/liboptimiser_linux_amd64.so; \
+	fi
 
 clean:
-	rm -rf $(BUILD_DIR)
-	rm -f $(addprefix $(GO_DIR)/, $(LIB_FILES))
+	rm -rf cpp/build lib

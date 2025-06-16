@@ -1,7 +1,7 @@
 .PHONY: all build clean
 
 CPP_DIR := cpp
-GO_DIR := go
+GO_DIR := .
 BUILD_DIR := $(CPP_DIR)/build
 
 UNAME_S := $(shell uname -s)

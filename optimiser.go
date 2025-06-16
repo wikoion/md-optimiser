@@ -1,5 +1,5 @@
 // optimiser.go
-//go:generate make -C ..
+//go:generate make -C .
 
 package md_solver
 

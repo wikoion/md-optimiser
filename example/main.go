@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"md_solver"
+	md_solver "github.com/wikoion/md-optimiser"
 )
 
 type MD struct {

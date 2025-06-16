@@ -22,9 +22,9 @@ CGO_LDFLAGS="-Wl,-rpath,$PWD" go build
 
 ## Usage
 
-Import the module as `md_solver` and call `OptimisePlacement`. Machine
-deployments, pods and placement rules are provided as slices. Plugin scores allow
-expressing per‑deployment preferences (higher scores = more preferred).
+Import the module as `md_solver` and call `OptimisePlacement`. Machine Deployment and Pod interfaces
+exist to allow type flexibility. Implement your own types and pass your mds, pods and placement rules as slices. 
+Plugin scores allow expressing per‑deployment preferences (higher scores = more preferred).
 
 ```go
 mds := []md_solver.MachineDeployment{
@@ -39,7 +39,7 @@ scores := []float64{1.0}              // one score per MD
 allowed := []int{1}                   // pod 0 may run on MD 0
 initial := []int{-1}                  // optional starting hint
 
-result := md_solver.OptimisePlacement(mds, pods, scores, allowed, initial)
+result := md_solver.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
 if result.Succeeded {
     fmt.Println("Assignments:", result.Assignments)
 }

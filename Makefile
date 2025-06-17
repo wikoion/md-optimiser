@@ -24,16 +24,17 @@ build:
 
 	# On macOS, cross-compile Linux .so via Docker
 	@if [ "$(GOOS)" = "darwin" ]; then \
-	  echo "→ macOS: cross-compiling Linux .so via Docker"; \
+	  echo "macOS: cross-compiling Linux .so via Docker"; \
 	  docker buildx build --platform linux/amd64 -f Dockerfile.build-linux-so -t ortools-builder . ; \
-	  docker run --rm --platform linux/amd64 -v "$$(pwd)":/src -w /src ortools-builder bash -c "\
-	    mkdir -p /tmp/linux-build && cd /tmp/linux-build && \
-	    cmake /src/cpp && make && \
-	    cp liboptimiser.so /src/lib/liboptimiser_linux_amd64.so" ; \
+	  docker run --rm --platform linux/amd64 -v "$$(pwd)":/src -w /src ortools-builder bash -c '\
+	  mkdir -p /tmp/linux-build && cd /tmp/linux-build && \
+	  cmake /src/cpp -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_RPATH=/opt/ortools/lib && \
+	  make && cp liboptimiser.so /src/lib/liboptimiser_linux_amd64.so' ; \
 	fi
 
+
 clean:
-	@echo "→ Cleaning build output"
+	@echo "Cleaning build output"
 	@if [ "$(GOOS)" = "darwin" ]; then \
 	  rm -f lib/liboptimiser_darwin_arm64.dylib lib/liboptimiser_linux_amd64.so; \
 	fi

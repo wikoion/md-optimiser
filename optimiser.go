@@ -5,7 +5,7 @@ package optimiser
 
 /*
 #cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib -Wl,-rpath,${SRCDIR}/lib -loptimiser_darwin_arm64
-#cgo linux,amd64  LDFLAGS: -L${SRCDIR}/lib -loptimiser_linux_amd64
+#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib -Wl,-rpath,${SRCDIR}/lib -loptimiser
 #include <dlfcn.h>
 #include <stdlib.h>
 

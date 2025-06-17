@@ -19,26 +19,15 @@ build:
 	# Linux native .so build
 	@if [ "$(GOOS)" = "linux" ] && [ -f cpp/build/liboptimiser.so ]; then \
 	  echo "Linux: copying liboptimiser.so"; \
-	  cp cpp/build/liboptimiser.so lib/liboptimiser_linux_amd64.so; \
+	  cp cpp/build/liboptimiser.so lib/liboptimiser.so; \
 	fi
-
-	# On macOS, cross-compile Linux .so via Docker
-	@if [ "$(GOOS)" = "darwin" ]; then \
-	  echo "macOS: cross-compiling Linux .so via Docker"; \
-	  docker buildx build --platform linux/amd64 -f Dockerfile.build-linux-so -t ortools-builder . ; \
-	  docker run --rm --platform linux/amd64 -v "$$(pwd)":/src -w /src ortools-builder bash -c '\
-	  mkdir -p /tmp/linux-build && cd /tmp/linux-build && \
-	  cmake /src/cpp -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_RPATH=/opt/ortools/lib && \
-	  make && cp liboptimiser.so /src/lib/liboptimiser_linux_amd64.so' ; \
-	fi
-
 
 clean:
 	@echo "Cleaning build output"
 	@if [ "$(GOOS)" = "darwin" ]; then \
-	  rm -f lib/liboptimiser_darwin_arm64.dylib lib/liboptimiser_linux_amd64.so; \
+	  rm -f lib/liboptimiser_darwin_arm64.dylib \
 	fi
 	@if [ "$(GOOS)" = "linux" ]; then \
-	  rm -f lib/liboptimiser_linux_amd64.so; \
+	  rm -f lib/liboptimiser.so; \
 	fi
 	rm -rf cpp/build

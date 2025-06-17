@@ -16,7 +16,7 @@ import (
 	"unsafe"
 )
 
-//go:embed lib/liboptimiser_*.dylib lib/liboptimiser_*.so
+//go:embed lib/liboptimiser_*.dylib lib/liboptimiser.so
 var embeddedLibs embed.FS
 
 var alreadyLoaded = false
@@ -32,7 +32,7 @@ func extractAndLoadSharedLibrary() error {
 	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
 		libName = "liboptimiser_darwin_arm64.dylib"
 	case runtime.GOOS == "linux" && runtime.GOARCH == "amd64":
-		libName = "liboptimiser_linux_amd64.so"
+		libName = "liboptimiser.so"
 	default:
 		return fmt.Errorf("unsupported platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 	}

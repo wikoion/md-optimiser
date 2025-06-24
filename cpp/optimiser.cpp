@@ -126,16 +126,18 @@ SolverResult OptimisePlacement(
 
         sat::LinearExpr cpu_sum;
         sat::LinearExpr mem_sum;
+        sat::LinearExpr assigned_pods;
 
-        // Sum of all pod CPU/memory placed on this deployment
         for (int i = 0; i < num_pods; ++i) {
-            cpu_sum += x[i][j] * static_cast<int>(pods[i].cpu * 100);     // use 100x to convert to int
+            cpu_sum += x[i][j] * static_cast<int>(pods[i].cpu * 100);
             mem_sum += x[i][j] * static_cast<int>(pods[i].memory * 100);
+            assigned_pods += x[i][j];
         }
 
-        // Ensure pod demand fits within provisioned nodes * per-node capacity
         model.AddLessOrEqual(cpu_sum, nodes_used[j] * static_cast<int>(mds[j].cpu * 100));
         model.AddLessOrEqual(mem_sum, nodes_used[j] * static_cast<int>(mds[j].memory * 100));
+
+        model.AddGreaterOrEqual(nodes_used[j], assigned_pods);
     }
 
     // ------------------------

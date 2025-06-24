@@ -120,22 +120,37 @@ SolverResult OptimisePlacement(
 
     // For each deployment, compute how many nodes are needed and ensure total resource fits
     std::vector<sat::IntVar> nodes_used(num_mds);
+    std::vector<sat::BoolVar> used_flag(num_mds);  // NEW: usage indicators
+
     for (int j = 0; j < num_mds; ++j) {
-        // Variable: number of nodes to provision for deployment j
+        // 1. Create IntVar for node count
         nodes_used[j] = model.NewIntVar(Domain(0, mds[j].max_scale_out));
 
+        // 2. Accumulate total resource demand for this MD
         sat::LinearExpr cpu_sum;
         sat::LinearExpr mem_sum;
+        sat::LinearExpr assigned_pods;
 
-        // Sum of all pod CPU/memory placed on this deployment
         for (int i = 0; i < num_pods; ++i) {
-            cpu_sum += x[i][j] * static_cast<int>(pods[i].cpu * 100);     // use 100x to convert to int
+            cpu_sum += x[i][j] * static_cast<int>(pods[i].cpu * 100);
             mem_sum += x[i][j] * static_cast<int>(pods[i].memory * 100);
+            assigned_pods += x[i][j];  // Count pods assigned to MD j
         }
 
-        // Ensure pod demand fits within provisioned nodes * per-node capacity
+        // 3. Add capacity constraints
         model.AddLessOrEqual(cpu_sum, nodes_used[j] * static_cast<int>(mds[j].cpu * 100));
         model.AddLessOrEqual(mem_sum, nodes_used[j] * static_cast<int>(mds[j].memory * 100));
+
+        // 4. Add usage flag and binding constraints
+        used_flag[j] = model.NewBoolVar();  // Create BoolVar indicating MD usage
+
+        // If any pods assigned to j → used_flag[j] = true
+        model.AddGreaterThan(assigned_pods, 0).OnlyEnforceIf(used_flag[j]);
+        model.AddEquality(assigned_pods, 0).OnlyEnforceIf(used_flag[j].Not());
+
+        // Link used_flag to nodes_used
+        model.AddGreaterThan(nodes_used[j], 0).OnlyEnforceIf(used_flag[j]);
+        model.AddEquality(nodes_used[j], 0).OnlyEnforceIf(used_flag[j].Not());
     }
 
     // ------------------------

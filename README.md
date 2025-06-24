@@ -10,11 +10,10 @@ to minimise a weighted count of the nodes required across all deployments.
 ## Building
 
 Prebuilt shared libraries for Linux and macOS are committed to `go/`. To rebuild
-the C++ solver, run `go generate` in the `go` directory which invokes the
+the C++ solver, run `go generate` in the module root which invokes the
 `Makefile` and embeds the resulting library files.
 
 ```bash
-cd go
 # rebuilds liboptimiser.{so,dylib} and embeds them
 go generate
 CGO_LDFLAGS="-Wl,-rpath,$PWD" go build
@@ -65,7 +64,6 @@ plugins, greedy warm start generation and reporting of resource waste.
 ## Running the Example
 
 ```bash
-cd go
 go generate
 export DYLD_LIBRARY_PATH=$PWD   # use LD_LIBRARY_PATH on Linux
 go run example/main.go

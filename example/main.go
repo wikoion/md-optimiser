@@ -381,5 +381,12 @@ func main() {
 		totalWasteMem += wasteMem
 	}
 
+	fmt.Println("\nPod Assignments:")
+	for i, mdIdx := range result.Assignments {
+		p := pods[i]
+		fmt.Printf("Pod %02d (CPU: %.1f, Mem: %.1f) → %s\n",
+			i, p.GetCPU(), p.GetMemory(), mds[mdIdx].GetName())
+	}
+
 	fmt.Printf("\nTotal Waste:\n  CPU:    %.2f cores\n  Memory: %.2f GiB\n", totalWasteCPU, totalWasteMem)
 }

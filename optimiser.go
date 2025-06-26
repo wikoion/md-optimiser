@@ -20,6 +20,13 @@ typedef struct {
 typedef struct {
     double cpu;          // Pod CPU request
     double memory;       // Pod memory request
+
+	const int* affinity_peers;   // index list of pods this pod references
+    const int* affinity_rules;   // 1-to-1 rules (1 colocate, -1 anti, 0 none)
+    int affinity_count;
+
+    int colocation_preference;   // soft preference: 1 colocate, -1 spread, 0 none
+    double colocation_weight;    // how strongly to apply the soft preference
 } Pod;
 
 typedef struct {
@@ -63,6 +70,16 @@ type Pod interface {
 	GetCPU() float64
 	GetMemory() float64
 	GetLabel(string) string
+}
+
+type HasHardAffinity interface {
+	GetAffinityPeers() []int
+	GetAffinityRules() []int
+}
+
+type HasSoftAffinity interface {
+	GetColocationPreference() int
+	GetColocationWeight() float64
 }
 
 // Result returned from the optimisation function
@@ -120,8 +137,61 @@ func OptimisePlacementRaw(
 	// Convert Go Pods to C
 	// ---------------------------------------
 	cPods := make([]C.Pod, numPods)
+
+	// Track any allocated C arrays for freeing later
+	affinityArrays := []unsafe.Pointer{}
+	defer func() {
+		for _, ptr := range affinityArrays {
+			C.free(ptr)
+		}
+	}()
+
 	for i, p := range pods {
-		cPods[i] = C.Pod{cpu: C.double(p.GetCPU()), memory: C.double(p.GetMemory())}
+		base := p.(Pod)
+
+		var peers, rules []int
+		if ha, ok := p.(HasHardAffinity); ok {
+			peers = ha.GetAffinityPeers()
+			rules = ha.GetAffinityRules()
+
+			if len(peers) != len(rules) {
+				panic(fmt.Sprintf("pod %d: affinity_peers and affinity_rules length mismatch", i))
+			}
+		}
+
+		var colocPref int
+		var colocWeight float64
+		if sa, ok := p.(HasSoftAffinity); ok {
+			colocPref = sa.GetColocationPreference()
+			colocWeight = sa.GetColocationWeight()
+		}
+
+		// Marshal affinity arrays (if present)
+		var cPeers, cRules *C.int
+		if len(peers) > 0 {
+			cPeers = (*C.int)(C.malloc(C.size_t(len(peers)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+			cRules = (*C.int)(C.malloc(C.size_t(len(rules)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+			affinityArrays = append(affinityArrays, unsafe.Pointer(cPeers), unsafe.Pointer(cRules))
+
+			goPeers := (*[1 << 30]C.int)(unsafe.Pointer(cPeers))[:len(peers):len(peers)]
+			goRules := (*[1 << 30]C.int)(unsafe.Pointer(cRules))[:len(rules):len(rules)]
+			for j := range peers {
+				goPeers[j] = C.int(peers[j])
+				goRules[j] = C.int(rules[j])
+			}
+		}
+
+		cPods[i] = C.Pod{
+			cpu:    C.double(base.GetCPU()),
+			memory: C.double(base.GetMemory()),
+
+			affinity_peers: cPeers,
+			affinity_rules: cRules,
+			affinity_count: C.int(len(peers)),
+
+			colocation_preference: C.int(colocPref),
+			colocation_weight:     C.double(colocWeight),
+		}
 	}
 
 	// ---------------------------------------

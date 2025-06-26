@@ -5,6 +5,8 @@
 #include "ortools/sat/cp_model_solver.h"
 #include "ortools/util/sorted_interval_list.h"
 
+#include <unordered_set>
+#include <utility>
 #include <vector>
 #include <cmath>
 #include <string>
@@ -13,6 +15,15 @@
 // Bring OR-Tools namespace into scope
 using namespace operations_research;
 namespace sat = operations_research::sat;
+
+namespace std {
+    template <>
+    struct hash<std::pair<int, int>> {
+        std::size_t operator()(const std::pair<int, int>& p) const noexcept {
+            return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 1);
+        }
+    };
+}
 
 // Make symbols accessible to C code / Go FFI (via cgo)
 extern "C" {
@@ -33,6 +44,15 @@ struct MachineDeployment {
 struct Pod {
     double cpu;             // CPU required (e.g., 0.5 vCPU)
     double memory;          // Memory required (e.g., 1.0 GB)
+
+    // Hard affinity rules: same or different node as listed pod indices
+    const int* affinity_peers;  // array of pod indices
+    const int* affinity_rules;  // 1 = same node, -1 = different, 0 = none
+    int affinity_count;
+
+    // Soft preference: 1 = colocated, -1 = spread, 0 = none
+    int colocation_preference;
+    double colocation_weight;
 };
 
 // Enum for interpreting the solver's return status
@@ -83,6 +103,37 @@ SolverResult OptimisePlacement(
             // Enforce hard constraint: only allow assignments in the allowed matrix
             if (!allowed_matrix[i * num_mds + j]) {
                 model.AddEquality(x[i][j], 0);  // x[i][j] must be false
+            }
+        }
+    }
+
+    // ------------------------
+    // HARD AFFINITY CONSTRAINTS
+    // ------------------------
+
+    std::unordered_set<std::pair<int, int>> affinity_seen;
+
+    for (int i = 0; i < num_pods; ++i) {
+        const Pod& pod = pods[i];
+
+        for (int p = 0; p < pod.affinity_count; ++p) {
+            int other = pod.affinity_peers[p];
+            int rule = pod.affinity_rules[p];
+
+            if (other < 0 || other >= num_pods) continue;  // invalid index
+            if (i >= other || rule == 0) continue;  // skip duplicates or no-ops
+
+            auto pair = std::minmax(i, other);
+            if (!affinity_seen.insert(pair).second) continue;  // already added
+
+            for (int j = 0; j < num_mds; ++j) {
+                if (rule == 1) {
+                    // Must colocate
+                    model.AddEquality(x[i][j], x[other][j]);
+                } else if (rule == -1) {
+                    // Must NOT colocate
+                    model.AddBoolOr({x[i][j].Not(), x[other][j].Not()});
+                }
             }
         }
     }
@@ -166,6 +217,34 @@ SolverResult OptimisePlacement(
     }
 
     model.Minimize(objective);  // Set objective
+
+    // ------------------------
+    // SOFT AFFINITY PREFERENCES
+    // ------------------------
+
+    for (int i = 0; i < num_pods; ++i) {
+        const Pod& pod = pods[i];
+
+        if (pod.colocation_preference == 0 || pod.colocation_weight == 0.0) continue;
+
+        for (int j = 0; j < num_mds; ++j) {
+            sat::BoolVar penalty = model.NewBoolVar();
+
+            if (pod.colocation_preference == 1) {
+                // Prefer colocated: penalize assigning to unused MD
+                model.AddBoolAnd({x[i][j], used_flag[j].Not()}).OnlyEnforceIf(penalty);
+                model.AddBoolOr({x[i][j].Not(), used_flag[j]}).OnlyEnforceIf(penalty.Not());
+            } else if (pod.colocation_preference == -1) {
+                // Prefer spread: penalize assigning to used MD
+                model.AddBoolAnd({x[i][j], used_flag[j]}).OnlyEnforceIf(penalty);
+                model.AddBoolOr({x[i][j].Not(), used_flag[j].Not()}).OnlyEnforceIf(penalty.Not());
+            }
+
+            int soft_weight = static_cast<int>(pod.colocation_weight * 1000.0);
+            model.AddHint(penalty, 0);  // Hint: try to avoid penalty
+            model.Minimize(penalty * soft_weight);
+        }
+    }
 
     // ------------------------
     // 6. Solve

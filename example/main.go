@@ -37,10 +37,18 @@ func (md *MD) GetMaxScaleOut() int {
 // Pod represents a container workload with resource demands and labels.
 // Labels may be used to apply placement constraints like hardware preferences.
 type Pod struct {
-	CPU    float64           // CPU cores requested (e.g., 2.0 = 2 full cores)
-	Memory float64           // Memory requested in GiB
-	Labels map[string]string // Optional label constraints, e.g., {"workload-type": "nvme"}
+	CPU, Memory          float64
+	Labels               map[string]string
+	AffinityPeers        []int
+	AffinityRules        []int
+	ColocationPreference int
+	ColocationWeight     float64
 }
+
+func (p *Pod) GetAffinityPeers() []int      { return p.AffinityPeers }
+func (p *Pod) GetAffinityRules() []int      { return p.AffinityRules }
+func (p *Pod) GetColocationPreference() int { return p.ColocationPreference }
+func (p *Pod) GetColocationWeight() float64 { return p.ColocationWeight }
 
 func (p *Pod) GetCPU() float64 {
 	return p.CPU
@@ -177,13 +185,32 @@ func generateMDs() []optimiser.MachineDeployment {
 
 // generatePods returns a synthetic workload with a mix of pod shapes and optional constraints.
 func generatePods() []optimiser.Pod {
-	nvmePod := &Pod{CPU: 5, Memory: 11, Labels: map[string]string{"workload-type": "nvme"}}
-	pods := []optimiser.Pod{nvmePod}
+	var pods []optimiser.Pod
+
+	// Pod 0: prefers colocate with Pod 1, enforced hard constraint
+	pods = append(pods, &Pod{
+		CPU: 2, Memory: 4,
+		AffinityPeers:        []int{1},
+		AffinityRules:        []int{1}, // hard colocate
+		ColocationPreference: 1,        // prefer colocate
+		ColocationWeight:     1.0,
+	})
+
+	// Pod 1: prefers spread from Pod 0 (soft)
+	pods = append(pods, &Pod{
+		CPU: 2, Memory: 4,
+		AffinityPeers:        []int{},
+		AffinityRules:        []int{},
+		ColocationPreference: -1, // prefer spread
+		ColocationWeight:     0.5,
+	})
+
+	// Add regular pods
 	shapes := []struct {
 		cpu float64
 		mem float64
 	}{{2, 4}, {1, 8}, {4, 2}, {2, 8}, {3, 6}, {6, 12}, {8, 16}, {1, 16}}
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 198; i++ {
 		shape := shapes[i%len(shapes)]
 		pods = append(pods, &Pod{CPU: shape.cpu, Memory: shape.mem})
 	}

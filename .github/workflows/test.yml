@@ -1,0 +1,40 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: go test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ zlib1g-dev libbz2-dev make curl unzip
+
+      - name: Install OR-Tools
+        run: |
+          curl -L -o ortools.tar.gz https://github.com/google/or-tools/releases/download/v9.13/or-tools_amd64_ubuntu-24.04_cpp_v9.13.4784.tar.gz
+          sudo tar -xzf ortools.tar.gz -C /usr/local --strip-components=1
+          echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/ortools.conf
+          sudo ldconfig
+
+      - name: Run tests
+        env:
+          LD_LIBRARY_PATH: /usr/local/lib
+        run: |
+          go mod tidy
+          go test ./...
+

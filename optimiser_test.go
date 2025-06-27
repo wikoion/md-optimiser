@@ -194,3 +194,41 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 		t.Errorf("Expected failure message, got: %s", result.Message)
 	}
 }
+
+func TestOptimisePlacementRaw_SoftColocationPreference(t *testing.T) {
+
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-a", cpu: 4, memory: 16, maxScaleOut: 1},
+		&mockMD{name: "md-b", cpu: 4, memory: 16, maxScaleOut: 1},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 2, memory: 4, colocationPref: 1, colocationWeight: 1.0},
+		&mockPod{cpu: 2, memory: 4, colocationPref: 1, colocationWeight: 1.0},
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	allowed := make([]int, 0, numPods*numMDs)
+	for range pods {
+		for range mds {
+			allowed = append(allowed, 1)
+		}
+	}
+
+	scores := []float64{0.2, 0.8}
+	initial := make([]int, numPods)
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
+
+	if !result.Succeeded {
+		t.Fatalf("Expected success, got failure: %s", result.Message)
+	}
+	if result.SolverStatus != 2 && result.SolverStatus != 4 {
+		t.Errorf("Expected feasible or optimal status, got %d", result.SolverStatus)
+	}
+	if result.Assignments[0] != result.Assignments[1] {
+		t.Errorf("Pods not colocated despite preference (got %d and %d)", result.Assignments[0], result.Assignments[1])
+	}
+}

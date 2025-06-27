@@ -147,7 +147,7 @@ func OptimisePlacementRaw(
 	}()
 
 	for i, p := range pods {
-		base := p.(Pod)
+		base := p
 
 		var peers, rules []int
 		if ha, ok := p.(HasHardAffinity); ok {

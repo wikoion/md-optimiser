@@ -1,0 +1,74 @@
+{
+  "formatters": {
+    "enable": [
+      "gofmt",
+      "goimports"
+    ],
+    "exclusions": {
+      "generated": "lax",
+      "paths": [
+        "third_party$",
+        "builtin$",
+        "examples$"
+      ]
+    }
+  },
+  "linters": {
+    "default": "none",
+    "enable": [
+      "copyloopvar",
+      "dupl",
+      "errcheck",
+      "ginkgolinter",
+      "goconst",
+      "gocyclo",
+      "govet",
+      "ineffassign",
+      "lll",
+      "misspell",
+      "nakedret",
+      "prealloc",
+      "revive",
+      "staticcheck",
+      "unconvert",
+      "unparam",
+      "unused"
+    ],
+    "exclusions": {
+      "generated": "lax",
+      "paths": [
+        "third_party$",
+        "builtin$",
+        "examples$"
+      ],
+      "rules": [
+        {
+          "linters": [
+            "lll"
+          ],
+          "path": "api/*"
+        },
+        {
+          "linters": [
+            "dupl",
+            "lll"
+          ],
+          "path": "internal/*"
+        }
+      ]
+    },
+    "settings": {
+      "revive": {
+        "rules": [
+          {
+            "name": "comment-spacings"
+          }
+        ]
+      }
+    }
+  },
+  "run": {
+    "allow-parallel-runners": true
+  },
+  "version": "2"
+}

@@ -247,7 +247,7 @@ func normalizeScores(scores []float64) []float64 {
 	out := make([]float64, len(scores))
 	for i, v := range scores {
 		norm := (v - min) / (max - min)
-		out[i] = math.Pow(norm, 3) // Boost high scores further
+		out[i] = norm * norm * norm // Boost high scores further
 	}
 	return out
 }
@@ -278,7 +278,12 @@ func computeAllowedMatrix(pods []optimiser.Pod, mds []optimiser.MachineDeploymen
 
 // computeInitialAssignments generates a greedy seed assignment based on plugin scores.
 // Used to warm-start the SAT solver and speed up convergence.
-func computeInitialAssignments(pods []optimiser.Pod, mds []optimiser.MachineDeployment, allowed [][]int, scores []float64) []int {
+func computeInitialAssignments(
+	pods []optimiser.Pod,
+	mds []optimiser.MachineDeployment,
+	allowed [][]int,
+	scores []float64,
+) []int {
 	type podIdx struct {
 		i    int
 		c, m float64

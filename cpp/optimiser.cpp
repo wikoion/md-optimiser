@@ -46,13 +46,14 @@ struct Pod {
     double memory;          // Memory required (e.g., 1.0 GB)
 
     // Hard affinity rules: same or different node as listed pod indices
-    const int* affinity_peers;  // array of pod indices
-    const int* affinity_rules;  // 1 = same node, -1 = different, 0 = none
+    const int* affinity_peers;  // sparse array of pod indices (only peer pod indices)
+    const int* affinity_rules;  // matches above array for lookups, 1 = same node, -1 = different
     int affinity_count;
 
-    // Soft preference: 1 = colocated, -1 = spread, 0 = none
-    int colocation_preference;
-    double colocation_weight;
+    // Soft preference: +0.8 = strong colocate preference, -0.8 = strong spread preference
+    const int* soft_peers;          // sparse array of pod indices (only peer pod indices)
+    const double* soft_affinities;  // matches above array for lookups, 0.x = same node, -0.x = different, 0 = none
+    int soft_affinity_count;
 };
 
 // Enum for interpreting the solver's return status
@@ -108,7 +109,7 @@ SolverResult OptimisePlacement(
     }
 
     // ------------------------
-    // HARD AFFINITY CONSTRAINTS
+    // 2. Hard Affinity Constraints
     // ------------------------
 
     std::unordered_set<std::pair<int, int>> affinity_seen;
@@ -139,7 +140,7 @@ SolverResult OptimisePlacement(
     }
 
     // ------------------------
-    // 2. Provide hint (optional)
+    // 3. Provide hint (optional)
     // ------------------------
 
     // A hint suggests a good starting point for the solver (not mandatory)
@@ -153,7 +154,7 @@ SolverResult OptimisePlacement(
     }
 
     // ------------------------
-    // 3. Assignment constraint
+    // 4. Assignment constraint
     // ------------------------
 
     // Each pod must be assigned to exactly one deployment
@@ -166,7 +167,7 @@ SolverResult OptimisePlacement(
     }
 
     // ------------------------
-    // 4. Capacity constraints
+    // 5. Capacity constraints
     // ------------------------
 
     // For each deployment, compute how many nodes are needed and ensure total resource fits
@@ -205,7 +206,40 @@ SolverResult OptimisePlacement(
     }
 
     // ------------------------
-    // 5. Objective function
+    // 6. Soft Affinity Constraints
+    // ------------------------
+    sat::LinearExpr total_penalty;
+    for (int i = 0; i < num_pods; ++i) {
+        const Pod& pod = pods[i];
+
+        for (int p = 0; p < pod.soft_affinity_count; ++p) {
+            int peer = pod.soft_peers[p];
+            double affinity = pod.soft_affinities[p];
+
+            if (affinity == 0.0) continue;
+
+            int rule = (affinity > 0) ? 1 : -1;
+            int scaled_weight = static_cast<int>(std::abs(affinity) * 1000.0);
+
+            for (int j = 0; j < num_mds; ++j) {
+                sat::BoolVar penalty = model.NewBoolVar();
+
+                if (rule == 1) {
+                    model.AddBoolOr({x[i][j].Not(), x[peer][j].Not()}).OnlyEnforceIf(penalty);
+                    model.AddBoolAnd({x[i][j], x[peer][j]}).OnlyEnforceIf(penalty.Not());
+                } else {
+                    model.AddBoolAnd({x[i][j], x[peer][j]}).OnlyEnforceIf(penalty);
+                    model.AddBoolOr({x[i][j].Not(), x[peer][j].Not()}).OnlyEnforceIf(penalty.Not());
+                }
+
+                total_penalty += penalty * scaled_weight;
+            }
+        }
+    }
+
+
+    // ------------------------
+    // 7. Objective function
     // ------------------------
 
     // The goal is to minimize the total weighted cost of nodes used
@@ -216,38 +250,12 @@ SolverResult OptimisePlacement(
         objective += nodes_used[j] * weight;
     }
 
-    model.Minimize(objective);  // Set objective
+    double affinity_factor = 0.25;
+    objective += static_cast<int>(affinity_factor * 1000.0) * total_penalty;
+
 
     // ------------------------
-    // SOFT AFFINITY PREFERENCES
-    // ------------------------
-
-    for (int i = 0; i < num_pods; ++i) {
-        const Pod& pod = pods[i];
-
-        if (pod.colocation_preference == 0 || pod.colocation_weight == 0.0) continue;
-
-        for (int j = 0; j < num_mds; ++j) {
-            sat::BoolVar penalty = model.NewBoolVar();
-
-            if (pod.colocation_preference == 1) {
-                // Prefer colocated: penalize assigning to unused MD
-                model.AddBoolAnd({x[i][j], used_flag[j].Not()}).OnlyEnforceIf(penalty);
-                model.AddBoolOr({x[i][j].Not(), used_flag[j]}).OnlyEnforceIf(penalty.Not());
-            } else if (pod.colocation_preference == -1) {
-                // Prefer spread: penalize assigning to used MD
-                model.AddBoolAnd({x[i][j], used_flag[j]}).OnlyEnforceIf(penalty);
-                model.AddBoolOr({x[i][j].Not(), used_flag[j].Not()}).OnlyEnforceIf(penalty.Not());
-            }
-
-            int soft_weight = static_cast<int>(pod.colocation_weight * 1000.0);
-            model.AddHint(penalty, 0);  // Hint: try to avoid penalty
-            model.Minimize(penalty * soft_weight);
-        }
-    }
-
-    // ------------------------
-    // 6. Solve
+    // 8. Solve
     // ------------------------
 
     const sat::CpSolverResponse response = sat::Solve(model.Build());
@@ -266,7 +274,7 @@ SolverResult OptimisePlacement(
     }
 
     // ------------------------
-    // 7. Extract solution
+    // 9. Extract solution
     // ------------------------
 
     // Output: for each pod, which deployment it's assigned to

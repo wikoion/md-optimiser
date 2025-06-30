@@ -21,12 +21,13 @@ typedef struct {
     double cpu;          // Pod CPU request
     double memory;       // Pod memory request
 
-	const int* affinity_peers;   // index list of pods this pod references
+    const int* affinity_peers;   // index list of pods this pod references
     const int* affinity_rules;   // 1-to-1 rules (1 colocate, -1 anti, 0 none)
     int affinity_count;
 
-    int colocation_preference;   // soft preference: 1 colocate, -1 spread, 0 none
-    double colocation_weight;    // how strongly to apply the soft preference
+    const int* soft_peers;        // soft affinity peer indices
+    const double* soft_affinities;// weights (positive = colocate, negative = spread)
+    int soft_affinity_count;
 } Pod;
 
 typedef struct {
@@ -57,7 +58,6 @@ import (
 // Public Go equivalents of the C structs
 // ------------------------
 
-// Defines a machine deployment in Go
 type MachineDeployment interface {
 	GetName() string
 	GetCPU() float64
@@ -65,7 +65,6 @@ type MachineDeployment interface {
 	GetMaxScaleOut() int
 }
 
-// Represents a pod in Go
 type Pod interface {
 	GetCPU() float64
 	GetMemory() float64
@@ -78,25 +77,19 @@ type HasHardAffinity interface {
 }
 
 type HasSoftAffinity interface {
-	GetColocationPreference() int
-	GetColocationWeight() float64
+	GetSoftAffinityPeers() []int
+	GetSoftAffinityWeights() []float64
 }
 
-// Result returned from the optimisation function
 type Result struct {
-	Assignments   []int   // For each pod, the index of its assigned deployment
-	NodesUsed     []int   // For each deployment, number of nodes used
-	Succeeded     bool    // True if solution was found
-	Objective     float64 // Objective value from the solver
-	SolverStatus  int     // Status code from the solver
-	SolveTimeSecs float64 // Time the solver took in seconds
-	Message       string  // Human-readable summary
+	Assignments   []int
+	NodesUsed     []int
+	Succeeded     bool
+	Objective     float64
+	SolverStatus  int
+	SolveTimeSecs float64
+	Message       string
 }
-
-// ------------------------
-// Main wrapper function: converts Go structs into C-compatible values,
-// invokes the C++ solver, and converts results back to Go
-// ------------------------
 
 func OptimisePlacementRaw(
 	mds []MachineDeployment,
@@ -112,13 +105,10 @@ func OptimisePlacementRaw(
 	numMDs := len(mds)
 	numPods := len(pods)
 
-	// ---------------------------------------
-	// Convert Go MachineDeployments to C
-	// ---------------------------------------
 	cMDs := make([]C.MachineDeployment, numMDs)
-	cNames := make([]*C.char, numMDs) // hold allocated C strings so we can free them later
+	cNames := make([]*C.char, numMDs)
 	for i, md := range mds {
-		cNames[i] = C.CString(md.GetName()) // convert Go string to *C.char
+		cNames[i] = C.CString(md.GetName())
 		cMDs[i] = C.MachineDeployment{
 			name:          cNames[i],
 			cpu:           C.double(md.GetCPU()),
@@ -126,22 +116,20 @@ func OptimisePlacementRaw(
 			max_scale_out: C.int(md.GetMaxScaleOut()),
 		}
 	}
-	// Clean up all allocated strings when done
 	defer func() {
 		for _, cstr := range cNames {
 			C.free(unsafe.Pointer(cstr))
 		}
 	}()
 
-	// ---------------------------------------
-	// Convert Go Pods to C
-	// ---------------------------------------
 	cPods := make([]C.Pod, numPods)
-
-	// Track any allocated C arrays for freeing later
-	affinityArrays := []unsafe.Pointer{}
+	hardPtrs := []unsafe.Pointer{}
+	softPtrs := []unsafe.Pointer{}
 	defer func() {
-		for _, ptr := range affinityArrays {
+		for _, ptr := range hardPtrs {
+			C.free(ptr)
+		}
+		for _, ptr := range softPtrs {
 			C.free(ptr)
 		}
 	}()
@@ -153,26 +141,26 @@ func OptimisePlacementRaw(
 		if ha, ok := p.(HasHardAffinity); ok {
 			peers = ha.GetAffinityPeers()
 			rules = ha.GetAffinityRules()
-
 			if len(peers) != len(rules) {
-				panic(fmt.Sprintf("pod %d: affinity_peers and affinity_rules length mismatch", i))
+				panic(fmt.Sprintf("pod %d: affinity_peers and affinity_rules mismatch", i))
 			}
 		}
 
-		var colocPref int
-		var colocWeight float64
+		var softPeers []int
+		var softWeights []float64
 		if sa, ok := p.(HasSoftAffinity); ok {
-			colocPref = sa.GetColocationPreference()
-			colocWeight = sa.GetColocationWeight()
+			softPeers = sa.GetSoftAffinityPeers()
+			softWeights = sa.GetSoftAffinityWeights()
+			if len(softPeers) != len(softWeights) {
+				panic(fmt.Sprintf("pod %d: soft affinity peers and weights mismatch", i))
+			}
 		}
 
-		// Marshal affinity arrays (if present)
 		var cPeers, cRules *C.int
 		if len(peers) > 0 {
 			cPeers = (*C.int)(C.malloc(C.size_t(len(peers)) * C.size_t(unsafe.Sizeof(C.int(0)))))
 			cRules = (*C.int)(C.malloc(C.size_t(len(rules)) * C.size_t(unsafe.Sizeof(C.int(0)))))
-			affinityArrays = append(affinityArrays, unsafe.Pointer(cPeers), unsafe.Pointer(cRules))
-
+			hardPtrs = append(hardPtrs, unsafe.Pointer(cPeers), unsafe.Pointer(cRules))
 			goPeers := (*[1 << 30]C.int)(unsafe.Pointer(cPeers))[:len(peers):len(peers)]
 			goRules := (*[1 << 30]C.int)(unsafe.Pointer(cRules))[:len(rules):len(rules)]
 			for j := range peers {
@@ -181,22 +169,32 @@ func OptimisePlacementRaw(
 			}
 		}
 
+		var cSoftPeers *C.int
+		var cSoftWeights *C.double
+		if len(softPeers) > 0 {
+			cSoftPeers = (*C.int)(C.malloc(C.size_t(len(softPeers)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+			cSoftWeights = (*C.double)(C.malloc(C.size_t(len(softWeights)) * C.size_t(unsafe.Sizeof(C.double(0)))))
+			softPtrs = append(softPtrs, unsafe.Pointer(cSoftPeers), unsafe.Pointer(cSoftWeights))
+			goSoftPeers := (*[1 << 30]C.int)(unsafe.Pointer(cSoftPeers))[:len(softPeers):len(softPeers)]
+			goSoftWeights := (*[1 << 30]C.double)(unsafe.Pointer(cSoftWeights))[:len(softWeights):len(softWeights)]
+			for j := range softPeers {
+				goSoftPeers[j] = C.int(softPeers[j])
+				goSoftWeights[j] = C.double(softWeights[j])
+			}
+		}
+
 		cPods[i] = C.Pod{
-			cpu:    C.double(base.GetCPU()),
-			memory: C.double(base.GetMemory()),
-
-			affinity_peers: cPeers,
-			affinity_rules: cRules,
-			affinity_count: C.int(len(peers)),
-
-			colocation_preference: C.int(colocPref),
-			colocation_weight:     C.double(colocWeight),
+			cpu:                 C.double(base.GetCPU()),
+			memory:              C.double(base.GetMemory()),
+			affinity_peers:      cPeers,
+			affinity_rules:      cRules,
+			affinity_count:      C.int(len(peers)),
+			soft_peers:          cSoftPeers,
+			soft_affinities:     cSoftWeights,
+			soft_affinity_count: C.int(len(softPeers)),
 		}
 	}
 
-	// ---------------------------------------
-	// Convert pluginScores to C array
-	// ---------------------------------------
 	cScores := (*C.double)(C.malloc(C.size_t(len(pluginScores)) * C.size_t(unsafe.Sizeof(C.double(0)))))
 	defer C.free(unsafe.Pointer(cScores))
 	goScores := (*[1 << 30]C.double)(unsafe.Pointer(cScores))[:len(pluginScores):len(pluginScores)]
@@ -204,9 +202,6 @@ func OptimisePlacementRaw(
 		goScores[i] = C.double(s)
 	}
 
-	// ---------------------------------------
-	// Convert allowedMatrix (pod x deployment permissions) to C array
-	// ---------------------------------------
 	cAllowed := (*C.int)(C.malloc(C.size_t(len(allowedMatrix)) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(cAllowed))
 	goAllowed := (*[1 << 30]C.int)(unsafe.Pointer(cAllowed))[:len(allowedMatrix):len(allowedMatrix)]
@@ -214,9 +209,6 @@ func OptimisePlacementRaw(
 		goAllowed[i] = C.int(val)
 	}
 
-	// ---------------------------------------
-	// Convert initial assignment hint to C array
-	// ---------------------------------------
 	cHints := (*C.int)(C.malloc(C.size_t(len(initialAssignment)) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(cHints))
 	goHints := (*[1 << 30]C.int)(unsafe.Pointer(cHints))[:len(initialAssignment):len(initialAssignment)]
@@ -224,26 +216,17 @@ func OptimisePlacementRaw(
 		goHints[i] = C.int(h)
 	}
 
-	// ---------------------------------------
-	// Allocate memory for solver outputs
-	// ---------------------------------------
 	outAssign := (*C.int)(C.malloc(C.size_t(numPods) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outAssign))
 	outNodes := (*C.int)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outNodes))
 
-	// ---------------------------------------
-	// Call the actual C++ solver function
-	// ---------------------------------------
 	res := C.OptimisePlacement(
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores, cAllowed, cHints, outAssign, outNodes,
 	)
 
-	// ---------------------------------------
-	// Unpack the solver result into Go
-	// ---------------------------------------
 	result := Result{
 		Succeeded:     bool(res.success),
 		Objective:     float64(res.objective),
@@ -254,13 +237,11 @@ func OptimisePlacementRaw(
 		Message:       "",
 	}
 
-	// Solver gave up or failed
 	if !result.Succeeded {
 		result.Message = fmt.Sprintf("Solver failed with status code %d", result.SolverStatus)
 		return result
 	}
 
-	// Extract C array results back into Go slices
 	goAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[:numPods:numPods]
 	goNodes := (*[1 << 30]C.int)(unsafe.Pointer(outNodes))[:numMDs:numMDs]
 	for i := 0; i < numPods; i++ {

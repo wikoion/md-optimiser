@@ -37,18 +37,18 @@ func (md *MD) GetMaxScaleOut() int {
 // Pod represents a container workload with resource demands and labels.
 // Labels may be used to apply placement constraints like hardware preferences.
 type Pod struct {
-	CPU, Memory          float64
-	Labels               map[string]string
-	AffinityPeers        []int
-	AffinityRules        []int
-	ColocationPreference int
-	ColocationWeight     float64
+	CPU, Memory         float64
+	Labels              map[string]string
+	AffinityPeers       []int
+	AffinityRules       []int
+	SoftAffinityPeers   []int
+	SoftAffinityWeights []float64
 }
 
-func (p *Pod) GetAffinityPeers() []int      { return p.AffinityPeers }
-func (p *Pod) GetAffinityRules() []int      { return p.AffinityRules }
-func (p *Pod) GetColocationPreference() int { return p.ColocationPreference }
-func (p *Pod) GetColocationWeight() float64 { return p.ColocationWeight }
+func (p *Pod) GetAffinityPeers() []int           { return p.AffinityPeers }
+func (p *Pod) GetAffinityRules() []int           { return p.AffinityRules }
+func (p *Pod) GetSoftAffinityPeers() []int       { return p.SoftAffinityPeers }
+func (p *Pod) GetSoftAffinityWeights() []float64 { return p.SoftAffinityWeights }
 
 func (p *Pod) GetCPU() float64 {
 	return p.CPU
@@ -187,25 +187,25 @@ func generateMDs() []optimiser.MachineDeployment {
 func generatePods() []optimiser.Pod {
 	var pods []optimiser.Pod
 
-	// Pod 0: prefers colocate with Pod 1, enforced hard constraint
+	// Pod 0 hard colocates with Pod 1
 	pods = append(pods, &Pod{
 		CPU: 2, Memory: 4,
-		AffinityPeers:        []int{1},
-		AffinityRules:        []int{1}, // hard colocate
-		ColocationPreference: 1,        // prefer colocate
-		ColocationWeight:     1.0,
+		AffinityPeers:       []int{1},
+		AffinityRules:       []int{1}, // hard colocate
+		SoftAffinityPeers:   []int{1},
+		SoftAffinityWeights: []float64{0.8}, // prefer colocate
 	})
 
-	// Pod 1: prefers spread from Pod 0 (soft)
+	// Pod 1 prefers spreading from Pod 0
 	pods = append(pods, &Pod{
 		CPU: 2, Memory: 4,
-		AffinityPeers:        []int{},
-		AffinityRules:        []int{},
-		ColocationPreference: -1, // prefer spread
-		ColocationWeight:     0.5,
+		AffinityPeers:       []int{},
+		AffinityRules:       []int{},
+		SoftAffinityPeers:   []int{0},
+		SoftAffinityWeights: []float64{-0.5}, // prefer spread
 	})
 
-	// Add regular pods
+	// Additional generic pods
 	shapes := []struct {
 		cpu float64
 		mem float64

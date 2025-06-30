@@ -1,30 +1,36 @@
-FROM debian:bookworm
+# syntax=docker/dockerfile:1.4
+FROM --platform=linux/amd64 golang:1.24-bookworm AS builder
 
-# Install system tools
-RUN apt-get update && \
-    apt-get install -y cmake g++ curl tar zlib1g-dev libbz2-dev libabsl-dev make unzip
+# Install OR-Tools + build tools
+RUN apt-get update && apt-get install -y \
+    cmake g++ make curl unzip \
+    zlib1g-dev libbz2-dev libabsl-dev pkg-config
 
-# Install Protobuf 31.1 (precompiled tarball)
-RUN curl -fLO https://github.com/protocolbuffers/protobuf/releases/download/v31.1/protobuf-31.1.tar.gz && \
-    mkdir -p /opt/protobuf && \
-    tar -xzf protobuf-31.1.tar.gz -C /opt/protobuf --strip-components=1 && \
-    rm protobuf-31.1.tar.gz
-
-ENV CMAKE_PREFIX_PATH=/opt/protobuf:/opt/ortools
-ENV CPLUS_INCLUDE_PATH=/opt/protobuf/include:/opt/ortools/include
-ENV LIBRARY_PATH=/opt/protobuf/lib:/opt/ortools/lib
-ENV LD_LIBRARY_PATH=/opt/protobuf/lib:/opt/ortools/lib
-
-# Install OR-Tools v9.13
 RUN curl -L -o ortools.tar.gz https://github.com/google/or-tools/releases/download/v9.13/or-tools_amd64_debian-12_cpp_v9.13.4784.tar.gz && \
-    mkdir -p /opt/ortools && \
-    tar -xzf ortools.tar.gz -C /opt/ortools --strip-components=1 && \
-    rm ortools.tar.gz
+    tar -xzf ortools.tar.gz -C /usr/local --strip-components=1 && \
+    rm ortools.tar.gz && \
+    echo "/usr/local/lib" > /etc/ld.so.conf.d/ortools.conf && ldconfig
 
-# Environment for build + CMake detection
-ENV CMAKE_PREFIX_PATH=/opt/protobuf:/opt/ortools
-ENV CPLUS_INCLUDE_PATH=/opt/ortools/include:/opt/protobuf/include
-ENV LIBRARY_PATH=/opt/ortools/lib:/opt/protobuf/lib
-ENV LD_LIBRARY_PATH=/opt/ortools/lib:/opt/protobuf/lib
+ENV CGO_ENABLED=1
+ENV CPLUS_INCLUDE_PATH=/usr/local/include
+ENV LIBRARY_PATH=/usr/local/lib
+ENV LD_LIBRARY_PATH=/usr/local/lib
+ENV CMAKE_PREFIX_PATH=/usr/local
 
-WORKDIR /src
+# Copy and run go generate
+WORKDIR /project
+COPY . .
+
+RUN rm -rf cpp/build && mkdir -p cpp/build
+
+RUN go generate ./...
+
+RUN go generate ./...
+
+# Ensure .so is in a clean output path
+RUN mkdir -p /out/lib && \
+    find /project -name 'liboptimiser.so' -exec cp {} /out/lib/ \;
+
+# Final stage just for output
+FROM scratch AS export
+COPY --from=builder /out /out

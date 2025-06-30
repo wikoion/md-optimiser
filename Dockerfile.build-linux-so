@@ -25,12 +25,10 @@ RUN rm -rf cpp/build && mkdir -p cpp/build
 
 RUN go generate ./...
 
-RUN go generate ./...
-
 # Ensure .so is in a clean output path
-RUN mkdir -p /out/lib && \
-    find /project -name 'liboptimiser.so' -exec cp {} /out/lib/ \;
+RUN mkdir -p lib && \
+    find . -name 'liboptimiser.so' -exec cp {} lib/ \;
 
 # Final stage just for output
 FROM scratch AS export
-COPY --from=builder /out /out
+COPY --from=builder /project/lib /lib

@@ -9,9 +9,14 @@ add_library(optimiser SHARED optimiser.cpp)
 find_package(ortools REQUIRED)
 target_link_libraries(optimiser PRIVATE ortools::ortools)
 
+set_target_properties(optimiser PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+  BUILD_WITH_INSTALL_RPATH TRUE
+)
+
+# Apple fix for Go embed
 if(APPLE)
   set_target_properties(optimiser PROPERTIES SUFFIX ".dylib")
-  # Duplicate .dylib as .so so Go's embed doesn't fail
   add_custom_command(TARGET optimiser POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
       $<TARGET_FILE:optimiser>

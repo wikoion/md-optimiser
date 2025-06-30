@@ -14,6 +14,11 @@ build:
 	  echo "macOS: fixing install_name and copying liboptimiser.dylib"; \
 	  install_name_tool -id @rpath/liboptimiser_darwin_arm64.dylib cpp/build/liboptimiser.dylib; \
 	  cp cpp/build/liboptimiser.dylib lib/liboptimiser_darwin_arm64.dylib; \
+	  echo "macOS: building Linux .so using Docker"; \
+	  docker buildx build --platform=linux/amd64 \
+	    -f Dockerfile.build-linux-so \
+	    --output type=local,dest=. \
+	    -t optimiser-builder .; \
 	fi
 
 	# Linux native .so build

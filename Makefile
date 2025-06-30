@@ -36,3 +36,9 @@ clean:
 	  rm -f lib/liboptimiser.so; \
 	fi
 	rm -rf cpp/build
+
+test:
+	go test ./...
+
+lint:
+	golangci-lint run --fix

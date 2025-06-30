@@ -91,6 +91,30 @@ type Result struct {
 	Message       string
 }
 
+func makeCIntSlice(data []int) *C.int {
+	if len(data) == 0 {
+		return nil
+	}
+	ptr := (*C.int)(C.malloc(C.size_t(len(data)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	goSlice := (*[1 << 30]C.int)(unsafe.Pointer(ptr))[:len(data):len(data)]
+	for i, v := range data {
+		goSlice[i] = C.int(v)
+	}
+	return ptr
+}
+
+func makeCDoubleSlice(data []float64) *C.double {
+	if len(data) == 0 {
+		return nil
+	}
+	ptr := (*C.double)(C.malloc(C.size_t(len(data)) * C.size_t(unsafe.Sizeof(C.double(0)))))
+	goSlice := (*[1 << 30]C.double)(unsafe.Pointer(ptr))[:len(data):len(data)]
+	for i, v := range data {
+		goSlice[i] = C.double(v)
+	}
+	return ptr
+}
+
 func OptimisePlacementRaw(
 	mds []MachineDeployment,
 	pods []Pod,
@@ -158,29 +182,17 @@ func OptimisePlacementRaw(
 
 		var cPeers, cRules *C.int
 		if len(peers) > 0 {
-			cPeers = (*C.int)(C.malloc(C.size_t(len(peers)) * C.size_t(unsafe.Sizeof(C.int(0)))))
-			cRules = (*C.int)(C.malloc(C.size_t(len(rules)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+			cPeers = makeCIntSlice(peers)
+			cRules = makeCIntSlice(rules)
 			hardPtrs = append(hardPtrs, unsafe.Pointer(cPeers), unsafe.Pointer(cRules))
-			goPeers := (*[1 << 30]C.int)(unsafe.Pointer(cPeers))[:len(peers):len(peers)]
-			goRules := (*[1 << 30]C.int)(unsafe.Pointer(cRules))[:len(rules):len(rules)]
-			for j := range peers {
-				goPeers[j] = C.int(peers[j])
-				goRules[j] = C.int(rules[j])
-			}
 		}
 
 		var cSoftPeers *C.int
 		var cSoftWeights *C.double
 		if len(softPeers) > 0 {
-			cSoftPeers = (*C.int)(C.malloc(C.size_t(len(softPeers)) * C.size_t(unsafe.Sizeof(C.int(0)))))
-			cSoftWeights = (*C.double)(C.malloc(C.size_t(len(softWeights)) * C.size_t(unsafe.Sizeof(C.double(0)))))
+			cSoftPeers = makeCIntSlice(softPeers)
+			cSoftWeights = makeCDoubleSlice(softWeights)
 			softPtrs = append(softPtrs, unsafe.Pointer(cSoftPeers), unsafe.Pointer(cSoftWeights))
-			goSoftPeers := (*[1 << 30]C.int)(unsafe.Pointer(cSoftPeers))[:len(softPeers):len(softPeers)]
-			goSoftWeights := (*[1 << 30]C.double)(unsafe.Pointer(cSoftWeights))[:len(softWeights):len(softWeights)]
-			for j := range softPeers {
-				goSoftPeers[j] = C.int(softPeers[j])
-				goSoftWeights[j] = C.double(softWeights[j])
-			}
 		}
 
 		cPods[i] = C.Pod{

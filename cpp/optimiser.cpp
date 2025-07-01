@@ -87,7 +87,7 @@ SolverResult OptimisePlacement(
     int total_slots = slot_base[num_mds];
 
     for (int i = 0; i < num_pods; ++i) {
-        assignment[i] = model.NewIntVar(sat::Domain(0, total_slots - 1));
+        assignment[i] = model.NewIntVar(operations_research::Domain(0, total_slots - 1));
     }
 
     for (int i = 0; i < num_pods; ++i) {
@@ -103,7 +103,11 @@ SolverResult OptimisePlacement(
         x[i] = std::move(vars);
         x_index[i] = std::move(indices);
         model.AddEquality(sat::LinearExpr::Sum(x[i]), 1);
-        model.AddEquality(sat::LinearExpr::ScalProd(x[i], x_index[i]), assignment[i]);
+        sat::LinearExpr expr;
+        for (size_t v = 0; v < x[i].size(); ++v) {
+            expr += x[i][v] * x_index[i][v];
+        }
+        model.AddEquality(expr, assignment[i]);
     }
 
     absl::flat_hash_set<std::pair<int, int>> affinity_seen;

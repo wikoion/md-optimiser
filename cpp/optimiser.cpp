@@ -215,6 +215,9 @@ SolverResult OptimisePlacement(
     if (max_runtime_secs != nullptr) {
         parameters.set_max_time_in_seconds(static_cast<double>(*max_runtime_secs));
     }
+    parameters.set_random_seed(42);
+    parameters.set_randomize_search(false);
+    
     cp_model.Add(sat::NewSatParameters(parameters));
 
     const sat::CpSolverResponse response = sat::SolveCpModel(model.Build(), &cp_model);

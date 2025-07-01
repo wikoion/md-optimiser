@@ -201,7 +201,7 @@ SolverResult OptimisePlacement(
 
     sat::LinearExpr objective;
     for (int j = 0; j < num_mds; ++j) {
-        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0);
+        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
         int slots = slots_per_md[j];
         for (int k = 0; k < slots; ++k) {
             objective += slot_used[j][k] * weight;

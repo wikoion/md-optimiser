@@ -20,21 +20,21 @@ func (m *mockMD) GetMemory() float64  { return m.memory }
 func (m *mockMD) GetMaxScaleOut() int { return m.maxScaleOut }
 
 type mockPod struct {
-	cpu, memory      float64
-	labels           map[string]string
-	affinityPeers    []int
-	affinityRules    []int
-	colocationPref   int
-	colocationWeight float64
+	cpu, memory        float64
+	labels             map[string]string
+	affinityPeers      []int
+	affinityRules      []int
+	softAffinityPeers  []int
+	softAffinityValues []float64
 }
 
-func (p *mockPod) GetCPU() float64              { return p.cpu }
-func (p *mockPod) GetMemory() float64           { return p.memory }
-func (p *mockPod) GetLabel(key string) string   { return p.labels[key] }
-func (p *mockPod) GetAffinityPeers() []int      { return p.affinityPeers }
-func (p *mockPod) GetAffinityRules() []int      { return p.affinityRules }
-func (p *mockPod) GetColocationPreference() int { return p.colocationPref }
-func (p *mockPod) GetColocationWeight() float64 { return p.colocationWeight }
+func (p *mockPod) GetCPU() float64                  { return p.cpu }
+func (p *mockPod) GetMemory() float64               { return p.memory }
+func (p *mockPod) GetLabel(key string) string       { return p.labels[key] }
+func (p *mockPod) GetAffinityPeers() []int          { return p.affinityPeers }
+func (p *mockPod) GetAffinityRules() []int          { return p.affinityRules }
+func (p *mockPod) GetSoftAffinityPeers() []int      { return p.softAffinityPeers }
+func (p *mockPod) GetSoftAffinityValues() []float64 { return p.softAffinityValues }
 
 func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
@@ -54,7 +54,6 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	numPods := len(pods)
 	numMDs := len(mds)
 
-	// All pods allowed on all MDs
 	allowed := make([]int, 0, numPods*numMDs)
 	for range pods {
 		for range mds {
@@ -62,10 +61,7 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 		}
 	}
 
-	// Simulated plugin scores: favor md-c slightly
 	scores := []float64{0.3, 0.5, 0.8}
-
-	// No affinity at all: no special fields
 	initial := make([]int, numPods)
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
@@ -86,22 +82,16 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 
 func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-large", cpu: 16, memory: 64, maxScaleOut: 2}, // Total: 32 CPU, 128 GB
+		&mockMD{name: "md-large", cpu: 16, memory: 64, maxScaleOut: 2},
 	}
 
 	pods := []optimiser.Pod{
-		&mockPod{cpu: 4, memory: 8}, // Needs ~1/8th of 1 node
+		&mockPod{cpu: 4, memory: 8},
 		&mockPod{cpu: 6, memory: 16},
 		&mockPod{cpu: 2, memory: 4},
 	}
 
-	// Allowed: all 1s
-	allowed := []int{
-		1,
-		1,
-		1,
-	}
-
+	allowed := []int{1, 1, 1}
 	scores := []float64{0.0}
 	initial := []int{0, 0, 0}
 
@@ -117,21 +107,20 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 
 func TestOptimisePlacementRaw_ModerateWithAffinity(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-a", cpu: 16, memory: 64, maxScaleOut: 2}, // 32 CPU, 128 GiB
-		&mockMD{name: "md-b", cpu: 8, memory: 32, maxScaleOut: 2},  // 16 CPU, 64 GiB
+		&mockMD{name: "md-a", cpu: 16, memory: 64, maxScaleOut: 2},
+		&mockMD{name: "md-b", cpu: 8, memory: 32, maxScaleOut: 2},
 	}
 
 	pods := []optimiser.Pod{
-		&mockPod{cpu: 4, memory: 8}, // pod 0
-		&mockPod{cpu: 2, memory: 4, affinityPeers: []int{0}, affinityRules: []int{1}}, // pod 1: must colocate w/ 0
-		&mockPod{cpu: 6, memory: 16}, // pod 2
-		&mockPod{cpu: 1, memory: 2},  // pod 3
+		&mockPod{cpu: 4, memory: 8},
+		&mockPod{cpu: 2, memory: 4, affinityPeers: []int{0}, affinityRules: []int{1}},
+		&mockPod{cpu: 6, memory: 16},
+		&mockPod{cpu: 1, memory: 2},
 	}
 
 	numPods := len(pods)
 	numMDs := len(mds)
 
-	// Allow all pods on all MDs
 	allowed := make([]int, 0, numPods*numMDs)
 	for range pods {
 		for range mds {
@@ -139,9 +128,7 @@ func TestOptimisePlacementRaw_ModerateWithAffinity(t *testing.T) {
 		}
 	}
 
-	// Slight preference for md-a (simulate a plugin)
 	scores := []float64{0.9, 0.1}
-
 	initial := make([]int, numPods)
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
@@ -179,7 +166,7 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	}
 
 	scores := []float64{0.0}
-	allowed := []int{0} // pod not allowed on MD
+	allowed := []int{0}
 	initial := []int{0}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
@@ -196,15 +183,14 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 }
 
 func TestOptimisePlacementRaw_SoftColocationPreference(t *testing.T) {
-
 	mds := []optimiser.MachineDeployment{
 		&mockMD{name: "md-a", cpu: 4, memory: 16, maxScaleOut: 1},
 		&mockMD{name: "md-b", cpu: 4, memory: 16, maxScaleOut: 1},
 	}
 
 	pods := []optimiser.Pod{
-		&mockPod{cpu: 2, memory: 4, colocationPref: 1, colocationWeight: 1.0},
-		&mockPod{cpu: 2, memory: 4, colocationPref: 1, colocationWeight: 1.0},
+		&mockPod{cpu: 2, memory: 4, softAffinityPeers: []int{1}, softAffinityValues: []float64{0.9}},
+		&mockPod{cpu: 2, memory: 4, softAffinityPeers: []int{0}, softAffinityValues: []float64{0.9}},
 	}
 
 	numPods := len(pods)

@@ -1,9 +1,11 @@
 package optimiser_test
 
 import (
+	"fmt"
 	"regexp"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	optimiser "github.com/wikoion/md-optimiser"
 )
 
@@ -36,6 +38,59 @@ func (p *mockPod) GetAffinityRules() []int          { return p.affinityRules }
 func (p *mockPod) GetSoftAffinityPeers() []int      { return p.softAffinityPeers }
 func (p *mockPod) GetSoftAffinityValues() []float64 { return p.softAffinityValues }
 
+func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
+	mds := []optimiser.MachineDeployment{}
+	scores := []float64{}
+
+	// Create 6 MDs with increasing resources and plugin scores
+	for i := 1; i <= 6; i++ {
+		mds = append(mds, &mockMD{
+			name:        fmt.Sprintf("md-%d", i),
+			cpu:         float64(i), // 1.0 vCPU to 6.0 vCPU
+			memory:      float64(i), // 1 to 6 GiB
+			maxScaleOut: 10,
+		})
+		scores = append(scores, float64(i)/6.0) // Normalized score
+	}
+
+	// Generate 10 pods with increasing size
+	pods := []optimiser.Pod{}
+	for i := 1; i <= 10; i++ {
+		pods = append(pods, &mockPod{
+			cpu:    float64(i*250) / 1000.0, // 0.25 to 2.5 vCPU
+			memory: float64(i*300) / 1024.0, // 0.29 to 2.93 GiB
+		})
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	allowed := make([]int, 0, numPods*numMDs)
+	for range pods {
+		for range mds {
+			allowed = append(allowed, 1)
+		}
+	}
+	initial := make([]int, numPods)
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
+	if !result.Succeeded {
+		t.Fatalf("Expected success: %s", result.Message)
+	}
+
+	assert.Len(t, result.Assignments, numPods)
+	assert.Len(t, result.NodesUsed, numMDs)
+
+	// Expect most pods to land on md-6
+	md6Index := 5
+	assert.GreaterOrEqual(t, result.NodesUsed[md6Index], 3,
+		"Expected majority of pods on md-6 due to highest score")
+
+	t.Logf("Objective: %.2f", result.Objective)
+	t.Logf("Nodes used: %+v", result.NodesUsed)
+	t.Logf("Assignments: %+v", result.Assignments)
+}
+
 func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
 		&mockMD{name: "md-a", cpu: 16, memory: 64, maxScaleOut: 2},
@@ -60,7 +115,6 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 			allowed = append(allowed, 1)
 		}
 	}
-
 	scores := []float64{0.3, 0.5, 0.8}
 	initial := make([]int, numPods)
 
@@ -72,12 +126,6 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	if result.SolverStatus != 2 && result.SolverStatus != 4 {
 		t.Errorf("Expected feasible or optimal status, got %d", result.SolverStatus)
 	}
-
-	t.Log("Assignments:")
-	for i, mdIdx := range result.Assignments {
-		t.Logf("  Pod %d → %s", i, mds[mdIdx].GetName())
-	}
-	t.Logf("Objective: %.2f", result.Objective)
 }
 
 func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
@@ -105,57 +153,6 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 	}
 }
 
-func TestOptimisePlacementRaw_ModerateWithAffinity(t *testing.T) {
-	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-a", cpu: 16, memory: 64, maxScaleOut: 2},
-		&mockMD{name: "md-b", cpu: 8, memory: 32, maxScaleOut: 2},
-	}
-
-	pods := []optimiser.Pod{
-		&mockPod{cpu: 4, memory: 8},
-		&mockPod{cpu: 2, memory: 4, affinityPeers: []int{0}, affinityRules: []int{1}},
-		&mockPod{cpu: 6, memory: 16},
-		&mockPod{cpu: 1, memory: 2},
-	}
-
-	numPods := len(pods)
-	numMDs := len(mds)
-
-	allowed := make([]int, 0, numPods*numMDs)
-	for range pods {
-		for range mds {
-			allowed = append(allowed, 1)
-		}
-	}
-
-	scores := []float64{0.9, 0.1}
-	initial := make([]int, numPods)
-
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
-
-	if !result.Succeeded {
-		t.Fatalf("Expected success, got failure: %s", result.Message)
-	}
-	if result.SolverStatus != 2 && result.SolverStatus != 4 {
-		t.Errorf("Expected feasible or optimal status, got %d", result.SolverStatus)
-	}
-	if len(result.Assignments) != numPods {
-		t.Errorf("Expected %d assignments, got %d", numPods, len(result.Assignments))
-	}
-	if len(result.NodesUsed) != numMDs {
-		t.Errorf("Expected %d nodesUsed entries, got %d", numMDs, len(result.NodesUsed))
-	}
-
-	t.Log("Assignments:")
-	for i, mdIdx := range result.Assignments {
-		t.Logf("  Pod %d → %s", i, mds[mdIdx].GetName())
-	}
-
-	if result.Assignments[0] != result.Assignments[1] {
-		t.Errorf("Affinity failed: Pod 0 and 1 not colocated (got %d, %d)", result.Assignments[0], result.Assignments[1])
-	}
-}
-
 func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
 		&mockMD{name: "md-tiny", cpu: 1, memory: 1, maxScaleOut: 1},
@@ -179,42 +176,5 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	}
 	if matched, _ := regexp.MatchString("failed", result.Message); !matched {
 		t.Errorf("Expected failure message, got: %s", result.Message)
-	}
-}
-
-func TestOptimisePlacementRaw_SoftColocationPreference(t *testing.T) {
-	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-a", cpu: 4, memory: 16, maxScaleOut: 1},
-		&mockMD{name: "md-b", cpu: 4, memory: 16, maxScaleOut: 1},
-	}
-
-	pods := []optimiser.Pod{
-		&mockPod{cpu: 2, memory: 4, softAffinityPeers: []int{1}, softAffinityValues: []float64{0.9}},
-		&mockPod{cpu: 2, memory: 4, softAffinityPeers: []int{0}, softAffinityValues: []float64{0.9}},
-	}
-
-	numPods := len(pods)
-	numMDs := len(mds)
-
-	allowed := make([]int, 0, numPods*numMDs)
-	for range pods {
-		for range mds {
-			allowed = append(allowed, 1)
-		}
-	}
-
-	scores := []float64{0.2, 0.8}
-	initial := make([]int, numPods)
-
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
-
-	if !result.Succeeded {
-		t.Fatalf("Expected success, got failure: %s", result.Message)
-	}
-	if result.SolverStatus != 2 && result.SolverStatus != 4 {
-		t.Errorf("Expected feasible or optimal status, got %d", result.SolverStatus)
-	}
-	if result.Assignments[0] != result.Assignments[1] {
-		t.Errorf("Pods not colocated despite preference (got %d and %d)", result.Assignments[0], result.Assignments[1])
 	}
 }

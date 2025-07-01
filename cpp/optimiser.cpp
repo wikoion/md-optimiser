@@ -5,7 +5,7 @@
 #include "ortools/sat/cp_model_solver.h"
 #include "ortools/util/sorted_interval_list.h"
 
-#include <unordered_set>
+#include <absl/container/flat_hash_set.h>
 #include <utility>
 #include <vector>
 #include <cmath>
@@ -16,14 +16,6 @@
 using namespace operations_research;
 namespace sat = operations_research::sat;
 
-namespace std {
-    template <>
-    struct hash<std::pair<int, int>> {
-        std::size_t operator()(const std::pair<int, int>& p) const noexcept {
-            return std::hash<int>()(p.first) ^ (std::hash<int>()(p.second) << 1);
-        }
-    };
-}
 
 extern "C" {
 
@@ -77,31 +69,44 @@ SolverResult OptimisePlacement(
     sat::CpModelBuilder model;
 
     std::vector<int> slots_per_md(num_mds);
-    std::vector<std::vector<std::vector<sat::BoolVar>>> x(num_pods);
+    std::vector<std::vector<sat::BoolVar>> x(num_pods);
+    std::vector<std::vector<int>> x_index(num_pods);
     std::vector<std::vector<sat::BoolVar>> slot_used(num_mds);
+    std::vector<int> slot_base(num_mds + 1, 0);
+    std::vector<sat::IntVar> assignment(num_pods);
 
     for (int j = 0; j < num_mds; ++j) {
-        int max_slots = mds[j].max_scale_out;
+        int max_slots = std::min(mds[j].max_scale_out, num_pods);
         slots_per_md[j] = max_slots;
         slot_used[j].resize(max_slots);
         for (int k = 0; k < max_slots; ++k) {
             slot_used[j][k] = model.NewBoolVar();
         }
+        slot_base[j + 1] = slot_base[j] + max_slots;
+    }
+    int total_slots = slot_base[num_mds];
+
+    for (int i = 0; i < num_pods; ++i) {
+        assignment[i] = model.NewIntVar(sat::Domain(0, total_slots - 1));
     }
 
     for (int i = 0; i < num_pods; ++i) {
-        x[i].resize(num_mds);
+        std::vector<sat::BoolVar> vars;
+        std::vector<int> indices;
         for (int j = 0; j < num_mds; ++j) {
             if (!allowed_matrix[i * num_mds + j]) continue;
-            int slots = slots_per_md[j];
-            x[i][j].resize(slots);
-            for (int k = 0; k < slots; ++k) {
-                x[i][j][k] = model.NewBoolVar();
+            for (int k = 0; k < slots_per_md[j]; ++k) {
+                vars.push_back(model.NewBoolVar());
+                indices.push_back(slot_base[j] + k);
             }
         }
+        x[i] = std::move(vars);
+        x_index[i] = std::move(indices);
+        model.AddEquality(sat::LinearExpr::Sum(x[i]), 1);
+        model.AddEquality(sat::LinearExpr::ScalProd(x[i], x_index[i]), assignment[i]);
     }
 
-    std::unordered_set<std::pair<int, int>> affinity_seen;
+    absl::flat_hash_set<std::pair<int, int>> affinity_seen;
     for (int i = 0; i < num_pods; ++i) {
         const Pod& pod = pods[i];
         for (int p = 0; p < pod.affinity_count; ++p) {
@@ -110,16 +115,10 @@ SolverResult OptimisePlacement(
             if (other < 0 || other >= num_pods || i >= other || rule == 0) continue;
             auto pair = std::minmax(i, other);
             if (!affinity_seen.insert(pair).second) continue;
-            for (int j = 0; j < num_mds; ++j) {
-                if (!allowed_matrix[i * num_mds + j] || !allowed_matrix[other * num_mds + j]) continue;
-                int slots = slots_per_md[j];
-                for (int k = 0; k < slots; ++k) {
-                    if (rule == 1) {
-                        model.AddEquality(x[i][j][k], x[other][j][k]);
-                    } else {
-                        model.AddBoolOr({x[i][j][k].Not(), x[other][j][k].Not()});
-                    }
-                }
+            if (rule == 1) {
+                model.AddEquality(assignment[i], assignment[other]);
+            } else {
+                model.AddNotEqual(assignment[i], assignment[other]);
             }
         }
     }
@@ -128,32 +127,27 @@ SolverResult OptimisePlacement(
         for (int i = 0; i < num_pods; ++i) {
             int hint_md = initial_assignment[i];
             if (hint_md >= 0 && hint_md < num_mds && allowed_matrix[i * num_mds + hint_md] && slots_per_md[hint_md] > 0) {
-                model.AddHint(x[i][hint_md][0], 1);
+                model.AddHint(assignment[i], slot_base[hint_md]);
             }
         }
     }
 
-    for (int i = 0; i < num_pods; ++i) {
-        std::vector<sat::BoolVar> choices;
-        for (int j = 0; j < num_mds; ++j) {
-            if (!allowed_matrix[i * num_mds + j]) continue;
-            for (int k = 0; k < slots_per_md[j]; ++k) {
-                choices.push_back(x[i][j][k]);
-            }
-        }
-        model.AddEquality(sat::LinearExpr::Sum(choices), 1);
-    }
+
 
     for (int j = 0; j < num_mds; ++j) {
         int slots = slots_per_md[j];
         sat::LinearExpr used_sum;
         for (int k = 0; k < slots; ++k) {
+            int global = slot_base[j] + k;
             sat::LinearExpr cpu_sum, mem_sum, assigned;
             for (int i = 0; i < num_pods; ++i) {
-                if (!allowed_matrix[i * num_mds + j]) continue;
-                cpu_sum += x[i][j][k] * static_cast<int>(pods[i].cpu * 100);
-                mem_sum += x[i][j][k] * static_cast<int>(pods[i].memory * 100);
-                assigned += x[i][j][k];
+                for (size_t v = 0; v < x_index[i].size(); ++v) {
+                    if (x_index[i][v] == global) {
+                        cpu_sum += x[i][v] * static_cast<int>(pods[i].cpu * 100);
+                        mem_sum += x[i][v] * static_cast<int>(pods[i].memory * 100);
+                        assigned += x[i][v];
+                    }
+                }
             }
             model.AddLessOrEqual(cpu_sum, static_cast<int>(mds[j].cpu * 100));
             model.AddLessOrEqual(mem_sum, static_cast<int>(mds[j].memory * 100));
@@ -167,7 +161,7 @@ SolverResult OptimisePlacement(
         }
     }
 
-    std::unordered_set<std::pair<int, int>> soft_seen;
+    absl::flat_hash_set<std::pair<int, int>> soft_seen;
     sat::LinearExpr total_penalty;
     for (int i = 0; i < num_pods; ++i) {
         const Pod& pod = pods[i];
@@ -180,34 +174,29 @@ SolverResult OptimisePlacement(
             double affinity = pod.soft_affinities[p];
             if (affinity == 0.0) continue;
             int rule = (affinity > 0) ? 1 : -1;
-            int scaled_weight = static_cast<int>(std::abs(affinity) * 1000.0);
-            for (int j = 0; j < num_mds; ++j) {
-                if (!allowed_matrix[i * num_mds + j] || !allowed_matrix[peer * num_mds + j]) continue;
-                int slots = slots_per_md[j];
-                for (int k = 0; k < slots; ++k) {
-                    sat::BoolVar penalty = model.NewBoolVar();
-                    if (rule == 1) {
-                        model.AddBoolOr({x[i][j][k].Not(), x[peer][j][k].Not()}).OnlyEnforceIf(penalty);
-                        model.AddBoolAnd({x[i][j][k], x[peer][j][k]}).OnlyEnforceIf(penalty.Not());
-                    } else {
-                        model.AddBoolAnd({x[i][j][k], x[peer][j][k]}).OnlyEnforceIf(penalty);
-                        model.AddBoolOr({x[i][j][k].Not(), x[peer][j][k].Not()}).OnlyEnforceIf(penalty.Not());
-                    }
-                    total_penalty += penalty * scaled_weight;
-                }
+            int scaled_weight = static_cast<int>(std::abs(affinity) * 100);
+            sat::BoolVar penalty = model.NewBoolVar();
+            if (rule == 1) {
+                model.AddEquality(assignment[i], assignment[peer]).OnlyEnforceIf(penalty.Not());
+                model.AddNotEqual(assignment[i], assignment[peer]).OnlyEnforceIf(penalty);
+            } else {
+                model.AddNotEqual(assignment[i], assignment[peer]).OnlyEnforceIf(penalty.Not());
+                model.AddEquality(assignment[i], assignment[peer]).OnlyEnforceIf(penalty);
             }
+            total_penalty += penalty * scaled_weight;
         }
     }
 
     sat::LinearExpr objective;
     for (int j = 0; j < num_mds; ++j) {
-        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
-        int slots = slots_per_md[j];
-        for (int k = 0; k < slots; ++k) {
-            objective += slot_used[j][k] * weight;
+        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 100) + 1;
+        sat::LinearExpr md_used;
+        for (int k = 0; k < slots_per_md[j]; ++k) {
+            md_used += slot_used[j][k];
         }
+        objective += md_used * weight;
     }
-    objective += static_cast<int>(0.25 * 1000.0) * total_penalty;
+    objective += total_penalty;
     model.Minimize(objective);
 
     sat::Model cp_model;
@@ -234,16 +223,10 @@ SolverResult OptimisePlacement(
     }
 
     for (int i = 0; i < num_pods; ++i) {
-        for (int j = 0; j < num_mds; ++j) {
-            if (!allowed_matrix[i * num_mds + j]) continue;
-            for (int k = 0; k < slots_per_md[j]; ++k) {
-                if (sat::SolutionBooleanValue(response, x[i][j][k])) {
-                    out_assignments[i] = j;
-                    goto assigned;
-                }
-            }
-        }
-    assigned:;
+        int64_t slot = sat::SolutionIntegerValue(response, assignment[i]);
+        int md = 0;
+        while (md + 1 < num_mds && slot >= slot_base[md + 1]) ++md;
+        out_assignments[i] = md;
     }
 
     for (int j = 0; j < num_mds; ++j) {

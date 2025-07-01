@@ -85,7 +85,8 @@ SolverResult OptimisePlacement(
     const int* allowed_matrix,                          // 2D matrix: pod x deployment allowed (bool)
     const int* initial_assignment,                      // Optional: initial suggested pod-to-deployment
     int* out_assignments,                               // Output: per-pod selected deployment index
-    int* out_nodes_used                                 // Output: per-deployment number of nodes used
+    int* out_nodes_used,                                // Output: per-deployment number of nodes used
+    const int* max_runtime_secs                         // Maximum runtime for the model
 ) {
     SolverResult result;
 
@@ -95,15 +96,39 @@ SolverResult OptimisePlacement(
 
     sat::CpModelBuilder model;
 
-    // Decision variable matrix: x[i][j] = true if pod i is assigned to deployment j
-    std::vector<std::vector<sat::BoolVar>> x(num_pods, std::vector<sat::BoolVar>(num_mds));
+    // Decision variable tensor x[i][j][k] = true if pod i is assigned to slot k
+    // of deployment j. Each deployment exposes a number of logical node slots
+    // (<= max_scale_out) that act as proxies for real nodes.
+    std::vector<int> slots_per_md(num_mds);
+    std::vector<std::vector<std::vector<sat::BoolVar>>> x(
+        num_pods,
+        std::vector<std::vector<sat::BoolVar>>(num_mds));
+    std::vector<std::vector<sat::BoolVar>> slot_used(num_mds);
+
+    for (int j = 0; j < num_mds; ++j) {
+        // Number of slots modelled for this deployment. This can be tuned by the
+        // caller but must not exceed max_scale_out. For now we model all
+        // possible nodes.
+        int max_slots = mds[j].max_scale_out;
+        slots_per_md[j] = max_slots;
+        slot_used[j].resize(max_slots);
+        for (int k = 0; k < max_slots; ++k) {
+            slot_used[j][k] = model.NewBoolVar();
+        }
+    }
+
     for (int i = 0; i < num_pods; ++i) {
         for (int j = 0; j < num_mds; ++j) {
-            x[i][j] = model.NewBoolVar();  // Create boolean var
+            int slots = slots_per_md[j];
+            x[i][j].resize(slots);
+            for (int k = 0; k < slots; ++k) {
+                x[i][j][k] = model.NewBoolVar();
 
-            // Enforce hard constraint: only allow assignments in the allowed matrix
-            if (!allowed_matrix[i * num_mds + j]) {
-                model.AddEquality(x[i][j], 0);  // x[i][j] must be false
+                // Respect the allowed matrix on a per-deployment basis. If the
+                // pod cannot run on deployment j, all of its slots are disabled.
+                if (!allowed_matrix[i * num_mds + j]) {
+                    model.AddEquality(x[i][j][k], 0);
+                }
             }
         }
     }
@@ -122,18 +147,21 @@ SolverResult OptimisePlacement(
             int rule = pod.affinity_rules[p];
 
             if (other < 0 || other >= num_pods) continue;  // invalid index
-            if (i >= other || rule == 0) continue;  // skip duplicates or no-ops
+            if (i >= other || rule == 0) continue;          // skip duplicates
 
             auto pair = std::minmax(i, other);
             if (!affinity_seen.insert(pair).second) continue;  // already added
 
             for (int j = 0; j < num_mds; ++j) {
-                if (rule == 1) {
-                    // Must colocate
-                    model.AddEquality(x[i][j], x[other][j]);
-                } else if (rule == -1) {
-                    // Must NOT colocate
-                    model.AddBoolOr({x[i][j].Not(), x[other][j].Not()});
+                int slots = slots_per_md[j];
+                for (int k = 0; k < slots; ++k) {
+                    if (rule == 1) {
+                        // Must be on the same slot
+                        model.AddEquality(x[i][j][k], x[other][j][k]);
+                    } else if (rule == -1) {
+                        // Must NOT share a slot
+                        model.AddBoolOr({x[i][j][k].Not(), x[other][j][k].Not()});
+                    }
                 }
             }
         }
@@ -147,8 +175,9 @@ SolverResult OptimisePlacement(
     if (initial_assignment != nullptr) {
         for (int i = 0; i < num_pods; ++i) {
             int hint_md = initial_assignment[i];
-            if (hint_md >= 0 && hint_md < num_mds) {
-                model.AddHint(x[i][hint_md], 1);  // Suggest placing pod i on deployment hint_md
+            if (hint_md >= 0 && hint_md < num_mds && slots_per_md[hint_md] > 0) {
+                // Place the hint on the first slot of the suggested deployment.
+                model.AddHint(x[i][hint_md][0], 1);
             }
         }
     }
@@ -157,11 +186,14 @@ SolverResult OptimisePlacement(
     // 4. Assignment constraint
     // ------------------------
 
-    // Each pod must be assigned to exactly one deployment
+    // Each pod must be assigned to exactly one slot across all deployments
     for (int i = 0; i < num_pods; ++i) {
         std::vector<sat::BoolVar> choices;
         for (int j = 0; j < num_mds; ++j) {
-            choices.push_back(x[i][j]);
+            int slots = slots_per_md[j];
+            for (int k = 0; k < slots; ++k) {
+                choices.push_back(x[i][j][k]);
+            }
         }
         model.AddEquality(sat::LinearExpr::Sum(choices), 1);
     }
@@ -170,39 +202,36 @@ SolverResult OptimisePlacement(
     // 5. Capacity constraints
     // ------------------------
 
-    // For each deployment, compute how many nodes are needed and ensure total resource fits
-    std::vector<sat::IntVar> nodes_used(num_mds);
-    std::vector<sat::BoolVar> used_flag(num_mds);  // NEW: usage indicators
-
+    // For each deployment, enforce per-slot capacities and track slot usage.
     for (int j = 0; j < num_mds; ++j) {
-        // 1. Create IntVar for node count
-        nodes_used[j] = model.NewIntVar(Domain(0, mds[j].max_scale_out));
+        int slots = slots_per_md[j];
+        sat::LinearExpr used_sum;
+        for (int k = 0; k < slots; ++k) {
+            sat::LinearExpr cpu_sum;
+            sat::LinearExpr mem_sum;
+            sat::LinearExpr assigned;
+            for (int i = 0; i < num_pods; ++i) {
+                cpu_sum += x[i][j][k] * static_cast<int>(pods[i].cpu * 100);
+                mem_sum += x[i][j][k] * static_cast<int>(pods[i].memory * 100);
+                assigned += x[i][j][k];
+            }
+            model.AddLessOrEqual(cpu_sum, static_cast<int>(mds[j].cpu * 100));
+            model.AddLessOrEqual(mem_sum, static_cast<int>(mds[j].memory * 100));
 
-        // 2. Accumulate total resource demand for this MD
-        sat::LinearExpr cpu_sum;
-        sat::LinearExpr mem_sum;
-        sat::LinearExpr assigned_pods;
+            model.AddGreaterThan(assigned, 0).OnlyEnforceIf(slot_used[j][k]);
+            model.AddEquality(assigned, 0).OnlyEnforceIf(slot_used[j][k].Not());
 
-        for (int i = 0; i < num_pods; ++i) {
-            cpu_sum += x[i][j] * static_cast<int>(pods[i].cpu * 100);
-            mem_sum += x[i][j] * static_cast<int>(pods[i].memory * 100);
-            assigned_pods += x[i][j];  // Count pods assigned to MD j
+            used_sum += slot_used[j][k];
         }
 
-        // 3. Add capacity constraints
-        model.AddLessOrEqual(cpu_sum, nodes_used[j] * static_cast<int>(mds[j].cpu * 100));
-        model.AddLessOrEqual(mem_sum, nodes_used[j] * static_cast<int>(mds[j].memory * 100));
+        // Limit number of active slots by deployment scale-out limit
+        model.AddLessOrEqual(used_sum, mds[j].max_scale_out);
 
-        // 4. Add usage flag and binding constraints
-        used_flag[j] = model.NewBoolVar();  // Create BoolVar indicating MD usage
-
-        // If any pods assigned to j → used_flag[j] = true
-        model.AddGreaterThan(assigned_pods, 0).OnlyEnforceIf(used_flag[j]);
-        model.AddEquality(assigned_pods, 0).OnlyEnforceIf(used_flag[j].Not());
-
-        // Link used_flag to nodes_used
-        model.AddGreaterThan(nodes_used[j], 0).OnlyEnforceIf(used_flag[j]);
-        model.AddEquality(nodes_used[j], 0).OnlyEnforceIf(used_flag[j].Not());
+        // Optional symmetry breaking: higher indexed slots may only be used if
+        // previous one is also used.
+        for (int k = 0; k + 1 < slots; ++k) {
+            model.AddImplication(slot_used[j][k + 1], slot_used[j][k]);
+        }
     }
 
     // ------------------------
@@ -222,17 +251,20 @@ SolverResult OptimisePlacement(
             int scaled_weight = static_cast<int>(std::abs(affinity) * 1000.0);
 
             for (int j = 0; j < num_mds; ++j) {
-                sat::BoolVar penalty = model.NewBoolVar();
+                int slots = slots_per_md[j];
+                for (int k = 0; k < slots; ++k) {
+                    sat::BoolVar penalty = model.NewBoolVar();
 
-                if (rule == 1) {
-                    model.AddBoolOr({x[i][j].Not(), x[peer][j].Not()}).OnlyEnforceIf(penalty);
-                    model.AddBoolAnd({x[i][j], x[peer][j]}).OnlyEnforceIf(penalty.Not());
-                } else {
-                    model.AddBoolAnd({x[i][j], x[peer][j]}).OnlyEnforceIf(penalty);
-                    model.AddBoolOr({x[i][j].Not(), x[peer][j].Not()}).OnlyEnforceIf(penalty.Not());
+                    if (rule == 1) {
+                        model.AddBoolOr({x[i][j][k].Not(), x[peer][j][k].Not()}).OnlyEnforceIf(penalty);
+                        model.AddBoolAnd({x[i][j][k], x[peer][j][k]}).OnlyEnforceIf(penalty.Not());
+                    } else {
+                        model.AddBoolAnd({x[i][j][k], x[peer][j][k]}).OnlyEnforceIf(penalty);
+                        model.AddBoolOr({x[i][j][k].Not(), x[peer][j][k].Not()}).OnlyEnforceIf(penalty.Not());
+                    }
+
+                    total_penalty += penalty * scaled_weight;
                 }
-
-                total_penalty += penalty * scaled_weight;
             }
         }
     }
@@ -246,8 +278,11 @@ SolverResult OptimisePlacement(
     // Weights are derived from plugin_scores: higher scores = more desirable = lower weight
     sat::LinearExpr objective;
     for (int j = 0; j < num_mds; ++j) {
-        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0);  // inverse weighting
-        objective += nodes_used[j] * weight;
+        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0);
+        int slots = slots_per_md[j];
+        for (int k = 0; k < slots; ++k) {
+            objective += slot_used[j][k] * weight;
+        }
     }
 
     double affinity_factor = 0.25;
@@ -259,7 +294,16 @@ SolverResult OptimisePlacement(
     // 8. Solve
     // ------------------------
 
-    const sat::CpSolverResponse response = sat::Solve(model.Build());
+    // 1. Create the model context
+    sat::Model cp_model;
+
+    sat::SatParameters parameters;
+    if (max_runtime_secs != nullptr) {
+        parameters.set_max_time_in_seconds(static_cast<double>(*max_runtime_secs));
+    }
+    cp_model.Add(sat::NewSatParameters(parameters));
+
+    const sat::CpSolverResponse response = sat::SolveCpModel(model.Build(), &cp_model);
 
     // Parse solver status
     result.status_code = static_cast<int>(response.status());
@@ -280,18 +324,29 @@ SolverResult OptimisePlacement(
 
     // Output: for each pod, which deployment it's assigned to
     for (int i = 0; i < num_pods; ++i) {
-        for (int j = 0; j < num_mds; ++j) {
-            if (sat::SolutionBooleanValue(response, x[i][j])) {
-                out_assignments[i] = j;
-                break;
+        bool done = false;
+        for (int j = 0; j < num_mds && !done; ++j) {
+            int slots = slots_per_md[j];
+            for (int k = 0; k < slots; ++k) {
+                if (sat::SolutionBooleanValue(response, x[i][j][k])) {
+                    out_assignments[i] = j;
+                    done = true;
+                    break;
+                }
             }
         }
     }
 
-    // Output: for each deployment, how many nodes are used
+    // Output: for each deployment, how many slots are used
     for (int j = 0; j < num_mds; ++j) {
-        int used = static_cast<int>(sat::SolutionIntegerValue(response, nodes_used[j]));
-        out_nodes_used[j] = used;
+        int count = 0;
+        int slots = slots_per_md[j];
+        for (int k = 0; k < slots; ++k) {
+            if (sat::SolutionBooleanValue(response, slot_used[j][k])) {
+                ++count;
+            }
+        }
+        out_nodes_used[j] = count;
     }
 
     return result;

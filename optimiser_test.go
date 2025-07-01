@@ -73,7 +73,8 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 	}
 	initial := make([]int, numPods)
 
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
+	runtime := 15
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
 	if !result.Succeeded {
 		t.Fatalf("Expected success: %s", result.Message)
 	}
@@ -118,7 +119,8 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	scores := []float64{0.3, 0.5, 0.8}
 	initial := make([]int, numPods)
 
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
+	runtime := 15
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -143,7 +145,8 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 	scores := []float64{0.0}
 	initial := []int{0, 0, 0}
 
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
+	runtime := 15
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -166,7 +169,8 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	allowed := []int{0}
 	initial := []int{0}
 
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial)
+	runtime := 15
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
 
 	if result.Succeeded {
 		t.Fatalf("Expected failure due to incompatibility, got success")

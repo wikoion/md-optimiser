@@ -45,7 +45,8 @@ SolverResult OptimisePlacement(
     const int* allowed_matrix,
     const int* initial_assignment,
     int* out_assignments,
-    int* out_nodes_used
+    int* out_nodes_used,
+	const int* max_runtime_secs
 );
 */
 import "C"
@@ -121,6 +122,7 @@ func OptimisePlacementRaw(
 	pluginScores []float64,
 	allowedMatrix []int,
 	initialAssignment []int,
+	maxRuntimeSeconds *int,
 ) Result {
 	if err := extractAndLoadSharedLibrary(); err != nil {
 		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
@@ -207,6 +209,16 @@ func OptimisePlacementRaw(
 		}
 	}
 
+	// Defatul to 15s
+	if maxRuntimeSeconds == nil {
+		defaultRuntime := 15
+		maxRuntimeSeconds = &defaultRuntime
+	}
+
+	cMaxRuntime := (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
+	*cMaxRuntime = C.int(*maxRuntimeSeconds)
+	defer C.free(unsafe.Pointer(cMaxRuntime))
+
 	cScores := (*C.double)(C.malloc(C.size_t(len(pluginScores)) * C.size_t(unsafe.Sizeof(C.double(0)))))
 	defer C.free(unsafe.Pointer(cScores))
 	goScores := (*[1 << 30]C.double)(unsafe.Pointer(cScores))[:len(pluginScores):len(pluginScores)]
@@ -236,7 +248,7 @@ func OptimisePlacementRaw(
 	res := C.OptimisePlacement(
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
-		cScores, cAllowed, cHints, outAssign, outNodes,
+		cScores, cAllowed, cHints, outAssign, outNodes, cMaxRuntime,
 	)
 
 	result := Result{

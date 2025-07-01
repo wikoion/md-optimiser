@@ -252,6 +252,7 @@ SolverResult OptimisePlacement(
 
     double affinity_factor = 0.25;
     objective += static_cast<int>(affinity_factor * 1000.0) * total_penalty;
+    model.Minimize(objective);
 
 
     // ------------------------

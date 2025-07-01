@@ -201,7 +201,7 @@ SolverResult OptimisePlacement(
 
     sat::LinearExpr objective;
     for (int j = 0; j < num_mds; ++j) {
-        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0);
+        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
         int slots = slots_per_md[j];
         for (int k = 0; k < slots; ++k) {
             objective += slot_used[j][k] * weight;
@@ -215,6 +215,9 @@ SolverResult OptimisePlacement(
     if (max_runtime_secs != nullptr) {
         parameters.set_max_time_in_seconds(static_cast<double>(*max_runtime_secs));
     }
+    parameters.set_random_seed(42);
+    parameters.set_randomize_search(false);
+    
     cp_model.Add(sat::NewSatParameters(parameters));
 
     const sat::CpSolverResponse response = sat::SolveCpModel(model.Build(), &cp_model);

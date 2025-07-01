@@ -363,7 +363,8 @@ func main() {
 	initial := computeInitialAssignments(pods, mds, allowedMDs, scores)
 
 	start := time.Now()
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial)
+	runtime := 15
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, &runtime)
 	duration := time.Since(start)
 
 	fmt.Printf("\nResult: %s\nStatus Code: %d\nObjective: %.2f\nSolve Time: %.2fs\nDuration (Go): %s\n",

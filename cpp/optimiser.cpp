@@ -204,7 +204,7 @@ SolverResult OptimisePlacement(
         int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0);
         int slots = slots_per_md[j];
         for (int k = 0; k < slots; ++k) {
-            objective += slot_used[j][k] * weight * (k + 1);
+            objective += slot_used[j][k] * weight;
         }
     }
     objective += static_cast<int>(0.25 * 1000.0) * total_penalty;

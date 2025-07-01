@@ -208,7 +208,6 @@ SolverResult OptimisePlacement(
     // ------------------------
     // 6. Soft Affinity Constraints
     // ------------------------
-    int penalty_count = 0;
     sat::LinearExpr total_penalty;
     for (int i = 0; i < num_pods; ++i) {
         const Pod& pod = pods[i];
@@ -234,7 +233,6 @@ SolverResult OptimisePlacement(
                 }
 
                 total_penalty += penalty * scaled_weight;
-                ++penalty_count;
             }
         }
     }
@@ -252,10 +250,9 @@ SolverResult OptimisePlacement(
         objective += nodes_used[j] * weight;
     }
 
-    if (penalty_count > 0) {
-        double affinity_factor = 0.25;
-        objective += static_cast<int>(affinity_factor * 1000.0) * total_penalty;
-    }
+    double affinity_factor = 0.25;
+    objective += static_cast<int>(affinity_factor * 1000.0) * total_penalty;
+    model.Minimize(objective);
 
 
     // ------------------------

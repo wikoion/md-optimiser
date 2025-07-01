@@ -133,7 +133,9 @@ func (p *LeastWastePlugin) Score(md optimiser.MachineDeployment, stats PodStats)
 
 	wasteCPU := totalProvisionedCPU - stats.TotalCPU
 	wasteMem := totalProvisionedMem - stats.TotalMem
-	wasteRatio := (wasteCPU + wasteMem) / (totalProvisionedCPU + totalProvisionedMem)
+	normWasteCPU := wasteCPU / totalProvisionedCPU
+	normWasteMem := wasteMem / totalProvisionedMem
+	wasteRatio := (normWasteCPU + normWasteMem) / 2
 
 	return 1.0 - wasteRatio
 }
@@ -210,7 +212,7 @@ func generatePods() []optimiser.Pod {
 		cpu float64
 		mem float64
 	}{{2, 4}, {1, 8}, {4, 2}, {2, 8}, {3, 6}, {6, 12}, {8, 16}, {1, 16}}
-	for i := 0; i < 198; i++ {
+	for i := 0; i < 100; i++ {
 		shape := shapes[i%len(shapes)]
 		pods = append(pods, &Pod{CPU: shape.cpu, Memory: shape.mem})
 	}
@@ -351,8 +353,8 @@ func main() {
 	pods := generatePods()
 
 	plugins := []ScoringPlugin{
-		&FewestNodesPlugin{weight: 0.6},
-		&LeastWastePlugin{weight: 0.6},
+		&FewestNodesPlugin{weight: 0.2},
+		&LeastWastePlugin{weight: 1.0},
 		&RegexMatchPlugin{weight: 0.1, pattern: regexp.MustCompile(`.*-c7i$`)},
 	}
 

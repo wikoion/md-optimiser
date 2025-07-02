@@ -11,6 +11,7 @@
 #include <cmath>
 #include <string>
 #include <iostream>
+#include <thread>
 
 // Bring OR-Tools namespace into scope
 using namespace operations_research;
@@ -209,7 +210,12 @@ SolverResult OptimisePlacement(
         parameters.set_max_time_in_seconds(static_cast<double>(*max_runtime_secs));
     }
     parameters.set_random_seed(42);
-    parameters.set_randomize_search(false);
+    parameters.set_randomize_search(true);
+    
+    unsigned int concurrency = std::thread::hardware_concurrency();
+    parameters.set_num_search_workers(concurrency > 0 ? concurrency : 1);
+
+    parameters.set_optimize_with_core(true);
     
     cp_model.Add(sat::NewSatParameters(parameters));
 

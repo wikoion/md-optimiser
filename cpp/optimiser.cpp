@@ -61,92 +61,113 @@ struct SolverResult {
 };
 }
 
-// init_slots_used_matrix creates a zeroed 2d matrix of mds(ints) to slots(boolvars) 
-void init_slots_used_matrix(
-   int num_mds, const MachineDeployment* mds,
-   sat::CpModelBuilder* model,
-   vector<int>& slots_per_md,
-   vector<vector<sat::BoolVar>>& slot_used
-) {
-    for (int i = 0; i < num_mds; ++i) {
-        int max_slots = mds[i].max_scale_out;
-        slots_per_md.at(i) = max_slots;
-        slot_used.at(i).resize(max_slots);
-        for (int j = 0; j < max_slots; ++j) {
-            slot_used.at(i)[j] = model->NewBoolVar();
-        }
-    }
-}
+class Optimiser {
+private:
+   int num_mds;
+   const MachineDeployment* mds;
+   int num_pods;
+   const Pod* pods;
+   const int* allowed_matrix;
+   sat::CpModelBuilder* model;
+   vector<int> slots_per_md;
+   vector<vector<sat::BoolVar>> slot_used;
+   vector<vector<vector<sat::BoolVar>>> pod_slot_assignment;
 
-// init_pod_slot_assignment_matrix creates a zeroed 3d matrix/tensor of pods(int) to slots_used 
-// (mds int to md slots boolvar)
-void init_pod_slot_assignment_matrix(
-   int num_mds, int num_pods,
-   const int* allowed_matrix,
-   sat::CpModelBuilder* model,
-   vector<int>& slots_per_md,
-   vector<vector<sat::BoolVar>>& slot_used,
-   vector<vector<vector<sat::BoolVar>>>& pod_slot_assignment
-) {
-    for (int i = 0; i < num_pods; ++i) {
-        pod_slot_assignment.at(i).resize(num_mds);
-        for (int j = 0; j < num_mds; ++j) {
-            if (!allowed_matrix[i * num_mds + j]) continue;
-            int slots = slots_per_md.at(j);
-            pod_slot_assignment.at(i)[j].resize(slots);
-            for (int k = 0; k < slots; ++k) {
-                pod_slot_assignment.at(i)[j][k] = model->NewBoolVar();
+public:
+    explicit Optimiser(
+       int num_mds, const MachineDeployment* mds,
+       int num_pods, const Pod* pods,
+       const int* allowed_matrix,
+       sat::CpModelBuilder* model
+    ) : num_mds(num_mds), mds(mds), num_pods(num_pods), pods(pods), allowed_matrix(allowed_matrix),
+        model(model), slots_per_md(num_mds), slot_used(num_mds), pod_slot_assignment(num_pods)
+    {}
+
+    const vector<int>& GetSlotsPerMd() const { return slots_per_md; };
+    const vector<vector<sat::BoolVar>>& GetSlotUsed() const { return slot_used; };
+    const vector<vector<vector<sat::BoolVar>>>& GetPodSlotAssignment() const { return pod_slot_assignment; };
+
+    void InitSlotsUsed() {
+        for (int i = 0; i < num_mds; ++i) {
+            int max_slots = mds[i].max_scale_out;
+            slots_per_md[i] = max_slots;
+            slot_used[i].resize(max_slots);
+            for (int j = 0; j < max_slots; ++j) {
+                slot_used[i][j] = model->NewBoolVar();
             }
         }
-    }
-}
+    };
 
-
-void model_hard_pod_affinities(
-   int num_mds, int num_pods,
-   const Pod* pods,
-   const int* allowed_matrix,
-   sat::CpModelBuilder* model,
-   vector<int>& slots_per_md,
-   vector<vector<vector<sat::BoolVar>>>& pod_slot_assignment
-) {
-    std::unordered_set<std::pair<int, int>> affinity_seen;
-    for (int i = 0; i < num_pods; ++i) {
-        const Pod& pod = pods[i];
-
-        for (int p = 0; p < pod.affinity_count; ++p) {
-            int other = pod.affinity_peers[p];
-            int rule = pod.affinity_rules[p];
-
-            if (other < 0 || other >= num_pods || i >= other || rule == 0) continue;
-
-            auto pair = std::minmax(i, other);
-
-            if (!affinity_seen.insert(pair).second) continue;
-
+    // init_pod_slot_assignment_matrix creates a zeroed 3d matrix/tensor of pods(int) to slots_used 
+    // (mds int to md slots boolvar)
+    void InitPodSlotAssignment() {
+        for (int i = 0; i < num_pods; ++i) {
+            pod_slot_assignment[i].resize(num_mds);
             for (int j = 0; j < num_mds; ++j) {
-                if (!allowed_matrix[i * num_mds + j] || !allowed_matrix[other * num_mds + j]) continue;
+                if (!allowed_matrix[i * num_mds + j]) continue;
                 int slots = slots_per_md[j];
-
+                pod_slot_assignment[i][j].resize(slots);
                 for (int k = 0; k < slots; ++k) {
-                    if (rule == 1) {
-                        model->AddEquality(
-                                sat::LinearExpr(pod_slot_assignment[i][j][k]),
-                                sat::LinearExpr(pod_slot_assignment[other][j][k])
-                        );
-                    } else {
-                        model->AddBoolOr(absl::Span<const sat::BoolVar>(
-                            {
-                                pod_slot_assignment[i][j][k].Not(),
-                                pod_slot_assignment[other][j][k].Not()
-                            }
-                        ));
+                    pod_slot_assignment[i][j][k] = model->NewBoolVar();
+                }
+            }
+        }
+    };
+
+
+    void ModelHardPodAffinities() {
+        std::unordered_set<std::pair<int, int>> affinity_seen;
+        for (int i = 0; i < num_pods; ++i) {
+            const Pod& pod = pods[i];
+
+            for (int p = 0; p < pod.affinity_count; ++p) {
+                int other = pod.affinity_peers[p];
+                int rule = pod.affinity_rules[p];
+
+                if (other < 0 || other >= num_pods || i >= other || rule == 0) continue;
+
+                auto pair = std::minmax(i, other);
+
+                if (!affinity_seen.insert(pair).second) continue;
+
+                for (int j = 0; j < num_mds; ++j) {
+                    if (!allowed_matrix[i * num_mds + j] || !allowed_matrix[other * num_mds + j]) continue;
+                    int slots = slots_per_md[j];
+
+                    for (int k = 0; k < slots; ++k) {
+                        if (rule == 1) {
+                            model->AddEquality(
+                                    sat::LinearExpr(pod_slot_assignment[i][j][k]),
+                                    sat::LinearExpr(pod_slot_assignment[other][j][k])
+                            );
+                        } else {
+                            model->AddBoolOr(absl::Span<const sat::BoolVar>(
+                                {
+                                    pod_slot_assignment[i][j][k].Not(),
+                                    pod_slot_assignment[other][j][k].Not()
+                                }
+                            ));
+                        }
                     }
                 }
             }
         }
-    }
-}
+    };
+
+    void ModelOneSlotAssignmentPerPod() {
+        for (int i = 0; i < num_pods; ++i) {
+            std::vector<sat::BoolVar> choices;
+            for (int j = 0; j < num_mds; ++j) {
+                if (!allowed_matrix[i * num_mds + j]) continue;
+                for (int k = 0; k < slots_per_md[j]; ++k) {
+                    choices.push_back(pod_slot_assignment[i][j][k]);
+                }
+            }
+            absl::Span<const sat::BoolVar> span_choices(choices.data(), choices.size());
+            model->AddEquality(sat::LinearExpr::Sum(span_choices), 1);
+        }
+    };
+};
 
 extern "C" {
 __attribute__((visibility("default")))
@@ -163,13 +184,16 @@ SolverResult OptimisePlacement(
     SolverResult result;
     sat::CpModelBuilder model;
 
-    std::vector<int> slots_per_md(num_mds);
-    std::vector<vector<vector<sat::BoolVar>>> pod_slot_assignment(num_pods);
-    std::vector<vector<sat::BoolVar>> slot_used(num_mds);
+    Optimiser optimiser = Optimiser(num_mds, mds, num_pods, pods, allowed_matrix, &model);
+
+    optimiser.InitSlotsUsed();
+    optimiser.InitPodSlotAssignment();
+    optimiser.ModelHardPodAffinities();
+    optimiser.ModelOneSlotAssignmentPerPod();
     
-    init_slots_used_matrix(num_mds, mds, &model, slots_per_md, slot_used);
-    init_pod_slot_assignment_matrix(num_mds, num_pods, allowed_matrix, &model, slots_per_md, slot_used, pod_slot_assignment);
-    model_hard_pod_affinities(num_mds, num_pods, pods, allowed_matrix, &model, slots_per_md, pod_slot_assignment);
+    auto slots_per_md = optimiser.GetSlotsPerMd();
+    auto pod_slot_assignment = optimiser.GetPodSlotAssignment();
+    auto slot_used = optimiser.GetSlotUsed();
 
     if (initial_assignment != nullptr) {
         for (int i = 0; i < num_pods; ++i) {
@@ -178,18 +202,6 @@ SolverResult OptimisePlacement(
                 model.AddHint(pod_slot_assignment[i][hint_md][0], 1);
             }
         }
-    }
-
-    for (int i = 0; i < num_pods; ++i) {
-        std::vector<sat::BoolVar> choices;
-        for (int j = 0; j < num_mds; ++j) {
-            if (!allowed_matrix[i * num_mds + j]) continue;
-            for (int k = 0; k < slots_per_md[j]; ++k) {
-                choices.push_back(pod_slot_assignment[i][j][k]);
-            }
-        }
-        absl::Span<const sat::BoolVar> span_choices(choices.data(), choices.size());
-        model.AddEquality(sat::LinearExpr::Sum(span_choices), 1);
     }
 
     for (int j = 0; j < num_mds; ++j) {
@@ -265,7 +277,7 @@ SolverResult OptimisePlacement(
                             }
                         )).OnlyEnforceIf(penalty.Not());
                     }
-                    total_penalty = sat::LinearExpr(penalty) * scaled_weight;
+                    total_penalty += penalty * scaled_weight;
                 }
             }
         }

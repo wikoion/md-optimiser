@@ -20,6 +20,7 @@ import (
 var embeddedLibs embed.FS
 
 var alreadyLoaded = false
+var libHandle unsafe.Pointer
 
 func extractAndLoadSharedLibrary() error {
 	if alreadyLoaded {
@@ -56,6 +57,23 @@ func extractAndLoadSharedLibrary() error {
 	if handle == nil {
 		return fmt.Errorf("dlopen failed for %s", tmpPath)
 	}
-
+	
+	libHandle = handle
 	return nil
+}
+
+func getOptimisePlacementFunc() (unsafe.Pointer, error) {
+	if libHandle == nil {
+		return nil, fmt.Errorf("library not loaded")
+	}
+	
+	symName := C.CString("OptimisePlacement")
+	defer C.free(unsafe.Pointer(symName))
+	
+	sym := C.dlsym(libHandle, symName)
+	if sym == nil {
+		return nil, fmt.Errorf("symbol OptimisePlacement not found")
+	}
+	
+	return sym, nil
 }

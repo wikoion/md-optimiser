@@ -1,3 +1,4 @@
 cpp/build
 vendor
 cpp/.ccls-cache
+.ccls-cache

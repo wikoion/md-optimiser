@@ -6,8 +6,13 @@ package optimiser
 /*
 #cgo darwin LDFLAGS: -ldl
 #cgo linux LDFLAGS: -ldl
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdlib.h>
+
+#ifndef RTLD_DEFAULT
+#define RTLD_DEFAULT ((void *) 0)
+#endif
 
 // C struct definition mirroring the ones in optimiser.cpp
 typedef struct {

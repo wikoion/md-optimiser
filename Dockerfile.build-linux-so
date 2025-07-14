@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y \
     cmake g++ make curl unzip \
     zlib1g-dev libbz2-dev libabsl-dev pkg-config
 
-RUN curl -L -o ortools.tar.gz https://github.com/google/or-tools/releases/download/v9.13/or-tools_amd64_debian-12_cpp_v9.13.4784.tar.gz && \
+RUN curl -L -o ortools.tar.gz https://github.com/google/or-tools/releases/download/v9.14/or-tools_amd64_debian-12_cpp_v9.14.6206.tar.gz && \
     tar -xzf ortools.tar.gz -C /usr/local --strip-components=1 && \
     rm ortools.tar.gz && \
     echo "/usr/local/lib" > /etc/ld.so.conf.d/ortools.conf && ldconfig
@@ -25,9 +25,9 @@ RUN rm -rf cpp/build && mkdir -p cpp/build
 
 RUN go generate ./...
 
-# Ensure .so is in a clean output path
+# Ensure .so is in a clean output path with correct naming
 RUN mkdir -p lib && \
-    find . -name 'liboptimiser.so' -exec cp {} lib/ \;
+    find . -name 'liboptimiser.so' -exec cp {} lib/liboptimiser_linux_amd64.so \;
 
 # Final stage just for output
 FROM scratch AS export

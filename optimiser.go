@@ -59,7 +59,7 @@ SolverResult call_optimise_placement_dynamic(
         SolverResult err_result = {0, 0.0, -1, 0.0};
         return err_result;
     }
-    
+
     // Cast to the correct function pointer type
     typedef SolverResult (*OptimisePlacementFunc)(
         const MachineDeployment*, int,
@@ -71,12 +71,12 @@ SolverResult call_optimise_placement_dynamic(
         int*,
         const int*
     );
-    
+
     OptimisePlacementFunc func = (OptimisePlacementFunc)sym;
-    
+
     // Call the function
-    return func(mds, num_mds, pods, num_pods, plugin_scores, 
-                allowed_matrix, initial_assignment, out_assignments, 
+    return func(mds, num_mds, pods, num_pods, plugin_scores,
+                allowed_matrix, initial_assignment, out_assignments,
                 out_nodes_used, max_runtime_secs);
 }
 */

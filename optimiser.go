@@ -4,10 +4,15 @@
 package optimiser
 
 /*
-#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/lib -Wl,-rpath,${SRCDIR}/lib -loptimiser_darwin_arm64
-#cgo linux,amd64 LDFLAGS: -L${SRCDIR}/lib -Wl,-rpath,${SRCDIR}/lib -loptimiser
+#cgo darwin LDFLAGS: -ldl
+#cgo linux LDFLAGS: -ldl
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdlib.h>
+
+#ifndef RTLD_DEFAULT
+#define RTLD_DEFAULT ((void *) 0)
+#endif
 
 // C struct definition mirroring the ones in optimiser.cpp
 typedef struct {
@@ -37,8 +42,8 @@ typedef struct {
     double solve_time_secs; // Time solver spent in seconds
 } SolverResult;
 
-// Declaration of external C function we will call from Go
-SolverResult OptimisePlacement(
+// C wrapper function that dynamically calls OptimisePlacement
+SolverResult call_optimise_placement_dynamic(
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
@@ -46,8 +51,34 @@ SolverResult OptimisePlacement(
     const int* initial_assignment,
     int* out_assignments,
     int* out_nodes_used,
-	const int* max_runtime_secs
-);
+    const int* max_runtime_secs
+) {
+    // Get the function pointer using dlsym
+    void* sym = dlsym(RTLD_DEFAULT, "OptimisePlacement");
+    if (!sym) {
+        SolverResult err_result = {0, 0.0, -1, 0.0};
+        return err_result;
+    }
+
+    // Cast to the correct function pointer type
+    typedef SolverResult (*OptimisePlacementFunc)(
+        const MachineDeployment*, int,
+        const Pod*, int,
+        const double*,
+        const int*,
+        const int*,
+        int*,
+        int*,
+        const int*
+    );
+
+    OptimisePlacementFunc func = (OptimisePlacementFunc)sym;
+
+    // Call the function
+    return func(mds, num_mds, pods, num_pods, plugin_scores,
+                allowed_matrix, initial_assignment, out_assignments,
+                out_nodes_used, max_runtime_secs);
+}
 */
 import "C"
 import (
@@ -245,7 +276,7 @@ func OptimisePlacementRaw(
 	outNodes := (*C.int)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outNodes))
 
-	res := C.OptimisePlacement(
+	res := C.call_optimise_placement_dynamic(
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores, cAllowed, cHints, outAssign, outNodes, cMaxRuntime,

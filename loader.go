@@ -1,7 +1,6 @@
 package optimiser
 
 /*
-#cgo LDFLAGS: -ldl
 #include <dlfcn.h>
 #include <stdlib.h>
 */
@@ -16,10 +15,11 @@ import (
 	"unsafe"
 )
 
-//go:embed lib/liboptimiser_*.dylib lib/liboptimiser.so
+//go:embed lib/liboptimiser_*.dylib lib/liboptimiser_*.so
 var embeddedLibs embed.FS
 
 var alreadyLoaded = false
+var libHandle unsafe.Pointer
 
 func extractAndLoadSharedLibrary() error {
 	if alreadyLoaded {
@@ -32,7 +32,9 @@ func extractAndLoadSharedLibrary() error {
 	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
 		libName = "liboptimiser_darwin_arm64.dylib"
 	case runtime.GOOS == "linux" && runtime.GOARCH == "amd64":
-		libName = "liboptimiser.so"
+		libName = "liboptimiser_linux_amd64.so"
+	case runtime.GOOS == "linux" && runtime.GOARCH == "arm64":
+		libName = "liboptimiser_linux_arm64.so"
 	default:
 		return fmt.Errorf("unsupported platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
@@ -55,5 +57,22 @@ func extractAndLoadSharedLibrary() error {
 		return fmt.Errorf("dlopen failed for %s", tmpPath)
 	}
 
+	libHandle = handle
 	return nil
+}
+
+func getOptimisePlacementFunc() (unsafe.Pointer, error) {
+	if libHandle == nil {
+		return nil, fmt.Errorf("library not loaded")
+	}
+
+	symName := C.CString("OptimisePlacement")
+	defer C.free(unsafe.Pointer(symName))
+
+	sym := C.dlsym(libHandle, symName)
+	if sym == nil {
+		return nil, fmt.Errorf("symbol OptimisePlacement not found")
+	}
+
+	return sym, nil
 }

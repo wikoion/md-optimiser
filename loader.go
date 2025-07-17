@@ -54,7 +54,8 @@ func extractAndLoadSharedLibrary() error {
 
 	handle := C.dlopen(cPath, C.RTLD_NOW|C.RTLD_GLOBAL)
 	if handle == nil {
-		return fmt.Errorf("dlopen failed for %s", tmpPath)
+		errStr := C.GoString(C.dlerror())
+		return fmt.Errorf("dlopen failed for %s: %s", tmpPath, errStr)
 	}
 
 	libHandle = handle

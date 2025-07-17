@@ -53,11 +53,16 @@ SolverResult call_optimise_placement_dynamic(
     int* out_nodes_used,
     const int* max_runtime_secs
 ) {
-    // Get the function pointer using dlsym
+    // Get the function pointer using dlsym with RTLD_DEFAULT
+    // Since library is loaded with RTLD_GLOBAL, symbols should be available
     void* sym = dlsym(RTLD_DEFAULT, "OptimisePlacement");
     if (!sym) {
-        SolverResult err_result = {0, 0.0, -1, 0.0};
-        return err_result;
+        // Try with underscore prefix (macOS)
+        sym = dlsym(RTLD_DEFAULT, "_OptimisePlacement");
+        if (!sym) {
+            SolverResult err_result = {0, 0.0, -1, 0.0};
+            return err_result;
+        }
     }
 
     // Cast to the correct function pointer type
@@ -85,6 +90,7 @@ import (
 	"fmt"
 	"unsafe"
 )
+
 
 // ------------------------
 // Public Go equivalents of the C structs

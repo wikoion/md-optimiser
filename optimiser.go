@@ -43,7 +43,8 @@ typedef struct {
 } SolverResult;
 
 // C wrapper function that dynamically calls OptimisePlacement
-SolverResult call_optimise_placement_dynamic(
+SolverResult call_optimise_placement_with_handle(
+    void* lib_handle,
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
@@ -53,12 +54,11 @@ SolverResult call_optimise_placement_dynamic(
     int* out_nodes_used,
     const int* max_runtime_secs
 ) {
-    // Get the function pointer using dlsym with RTLD_DEFAULT
-    // Since library is loaded with RTLD_GLOBAL, symbols should be available
-    void* sym = dlsym(RTLD_DEFAULT, "OptimisePlacement");
+    // Get the function pointer using dlsym with the specific handle
+    void* sym = dlsym(lib_handle, "OptimisePlacement");
     if (!sym) {
         // Try with underscore prefix (macOS)
-        sym = dlsym(RTLD_DEFAULT, "_OptimisePlacement");
+        sym = dlsym(lib_handle, "_OptimisePlacement");
         if (!sym) {
             SolverResult err_result = {0, 0.0, -1, 0.0};
             return err_result;
@@ -282,7 +282,8 @@ func OptimisePlacementRaw(
 	outNodes := (*C.int)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outNodes))
 
-	res := C.call_optimise_placement_dynamic(
+	res := C.call_optimise_placement_with_handle(
+		GetLibHandle(),
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores, cAllowed, cHints, outAssign, outNodes, cMaxRuntime,

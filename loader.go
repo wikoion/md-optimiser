@@ -21,6 +21,11 @@ var embeddedLibs embed.FS
 var alreadyLoaded = false
 var libHandle unsafe.Pointer
 
+// GetLibHandle returns the loaded library handle
+func GetLibHandle() unsafe.Pointer {
+	return libHandle
+}
+
 func extractAndLoadSharedLibrary() error {
 	if alreadyLoaded {
 		return nil

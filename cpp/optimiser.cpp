@@ -107,7 +107,7 @@ SolverResult OptimisePlacement(
         for (int p = 0; p < pod.affinity_count; ++p) {
             int other = pod.affinity_peers[p];
             int rule = pod.affinity_rules[p];
-            if (other < 0 || other >= num_pods || i >= other || rule == 0) continue;
+            if (other < 0 || other >= num_pods || i > other || rule == 0) continue;
             auto pair = std::minmax(i, other);
             if (!affinity_seen.insert(pair).second) continue;
             for (int j = 0; j < num_mds; ++j) {

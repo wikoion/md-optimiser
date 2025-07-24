@@ -92,7 +92,6 @@ import (
 	"unsafe"
 )
 
-
 // ------------------------
 // Public Go equivalents of the C structs
 // ------------------------
@@ -127,12 +126,12 @@ type PodSlotAssignment struct {
 
 type Result struct {
 	PodAssignments []PodSlotAssignment
-	SlotsUsed     [][]bool
-	Succeeded     bool
-	Objective     float64
-	SolverStatus  int
-	SolveTimeSecs float64
-	Message       string
+	SlotsUsed      [][]bool
+	Succeeded      bool
+	Objective      float64
+	SolverStatus   int
+	SolveTimeSecs  float64
+	Message        string
 }
 
 func makeCIntSlice(data []int) *C.int {
@@ -305,7 +304,7 @@ func OptimisePlacementRaw(
 		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
 	)
 
-	rawAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[:numPods*2 : numPods*2]
+	rawAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[: numPods*2 : numPods*2]
 	assignments := make([]PodSlotAssignment, numPods)
 	for i := 0; i < numPods; i++ {
 		assignments[i] = PodSlotAssignment{
@@ -326,13 +325,13 @@ func OptimisePlacementRaw(
 	}
 
 	result := Result{
-		Succeeded:     bool(res.success),
-		Objective:     float64(res.objective),
-		SolverStatus:  int(res.status_code),
-		SolveTimeSecs: float64(res.solve_time_secs),
+		Succeeded:      bool(res.success),
+		Objective:      float64(res.objective),
+		SolverStatus:   int(res.status_code),
+		SolveTimeSecs:  float64(res.solve_time_secs),
 		PodAssignments: assignments,
-		SlotsUsed:     slotsUsed,
-		Message:       "",
+		SlotsUsed:      slotsUsed,
+		Message:        "",
 	}
 
 	if !result.Succeeded {

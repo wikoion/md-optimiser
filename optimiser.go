@@ -287,7 +287,7 @@ func OptimisePlacementRaw(
 		goHints[i] = C.int(h)
 	}
 
-	outAssign := (*C.int)(C.malloc(C.size_t(numPods) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	outAssign := (*C.int)(C.malloc(C.size_t(numPods*2) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outAssign))
 
 	outSlotsUsedCount := 0

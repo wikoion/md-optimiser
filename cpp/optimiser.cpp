@@ -11,6 +11,7 @@
 #include <cmath>
 #include <string>
 #include <iostream>
+#include <cstdint>
 
 // Bring OR-Tools namespace into scope
 using namespace operations_research;
@@ -69,8 +70,8 @@ SolverResult OptimisePlacement(
     const double* plugin_scores,
     const int* allowed_matrix,
     const int* initial_assignment,
-    int* out_assignments,
-    int* out_nodes_used,
+    int* out_slot_assignments,
+    uint8_t* out_slots_used,
     const int* max_runtime_secs
 ) {
     SolverResult result;
@@ -107,7 +108,7 @@ SolverResult OptimisePlacement(
         for (int p = 0; p < pod.affinity_count; ++p) {
             int other = pod.affinity_peers[p];
             int rule = pod.affinity_rules[p];
-            if (other < 0 || other >= num_pods || i >= other || rule == 0) continue;
+            if (other < 0 || other >= num_pods || i > other || rule == 0) continue;
             auto pair = std::minmax(i, other);
             if (!affinity_seen.insert(pair).second) continue;
             for (int j = 0; j < num_mds; ++j) {
@@ -238,7 +239,8 @@ SolverResult OptimisePlacement(
             if (!allowed_matrix[i * num_mds + j]) continue;
             for (int k = 0; k < slots_per_md[j]; ++k) {
                 if (sat::SolutionBooleanValue(response, x[i][j][k])) {
-                    out_assignments[i] = j;
+                    out_slot_assignments[i * 2] = j;
+                    out_slot_assignments[i * 2 + 1] = k;
                     goto assigned;
                 }
             }
@@ -246,17 +248,14 @@ SolverResult OptimisePlacement(
     assigned:;
     }
 
+    int offset = 0;
     for (int j = 0; j < num_mds; ++j) {
-        int count = 0;
         for (int k = 0; k < slots_per_md[j]; ++k) {
-            if (sat::SolutionBooleanValue(response, slot_used[j][k])) {
-                ++count;
-            }
+            out_slots_used[offset++] = sat::SolutionBooleanValue(response, slot_used[j][k]) ? 1 : 0;
         }
-        out_nodes_used[j] = count;
     }
 
     return result;
-}
+    }
 
 }  // extern "C"

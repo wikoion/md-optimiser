@@ -79,17 +79,39 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 		t.Fatalf("Expected success: %s", result.Message)
 	}
 
-	assert.Len(t, result.Assignments, numPods)
-	assert.Len(t, result.NodesUsed, numMDs)
+	assert.Len(t, result.PodAssignments, numPods)
+	assert.Len(t, result.SlotsUsed, numMDs)
 
 	// Expect most pods to land on md-6
 	md6Index := 5
-	assert.GreaterOrEqual(t, result.NodesUsed[md6Index], 3,
-		"Expected majority of pods on md-6 due to highest score")
+	usedCount := 0
+	for _, used := range result.SlotsUsed[md6Index] {
+		if used {
+			usedCount++
+		}
+	}
+	assert.GreaterOrEqual(t, usedCount, 3)
 
 	t.Logf("Objective: %.2f", result.Objective)
-	t.Logf("Nodes used: %+v", result.NodesUsed)
-	t.Logf("Assignments: %+v", result.Assignments)
+	t.Logf("Slots used:")
+	for j, mdSlots := range result.SlotsUsed {
+		summary := ""
+		for k, used := range mdSlots {
+			if used {
+				summary += fmt.Sprintf(" %d", k)
+			}
+		}
+		t.Logf("  MD %d used slots:%s", j, summary)
+	}
+	t.Logf("Assignments:")
+	for i, a := range result.PodAssignments {
+		t.Logf("  Pod %d → MD %d Slot %d", i, a.MD, a.Slot)
+	}
+
+	for i, assign := range result.PodAssignments {
+		assert.GreaterOrEqual(t, assign.MD, 0, fmt.Sprintf("Pod %d has invalid MD", i))
+		assert.GreaterOrEqual(t, assign.Slot, 0, fmt.Sprintf("Pod %d has invalid slot", i))
+	}
 }
 
 func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {

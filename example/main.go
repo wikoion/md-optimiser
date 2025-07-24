@@ -378,16 +378,28 @@ func main() {
 	}
 
 	totalNodes := 0
-	for _, n := range result.NodesUsed {
-		if n > 0 {
-			totalNodes += n
+	for _, slots := range result.SlotsUsed {
+		replicas := 0
+		for _, used := range slots {
+			if used {
+				replicas++
+			}
+		}
+		if replicas > 0 {
+			totalNodes += replicas
 		}
 	}
 
 	fmt.Printf("\nTotal Nodes: %d, Nodes used:\n", totalNodes)
-	for i, n := range result.NodesUsed {
-		if n > 0 {
-			fmt.Printf("%s → %d nodes\n", mds[i].GetName(), n)
+	for i, slots := range result.SlotsUsed {
+		replicas := 0
+		for _, used := range slots {
+			if used {
+				replicas++
+			}
+		}
+		if replicas > 0 {
+			fmt.Printf("%s → %d nodes\n", mds[i].GetName(), replicas)
 		}
 	}
 
@@ -396,18 +408,24 @@ func main() {
 	mdCPUUsed := make([]float64, len(mds))
 	mdMemUsed := make([]float64, len(mds))
 
-	for i, podIdx := range result.Assignments {
+	for i, assignment := range result.PodAssignments {
 		p := pods[i]
-		mdCPUUsed[podIdx] += p.GetCPU()
-		mdMemUsed[podIdx] += p.GetMemory()
+		mdCPUUsed[assignment.MD] += p.GetCPU()
+		mdMemUsed[assignment.MD] += p.GetMemory()
 	}
 
-	for i, used := range result.NodesUsed {
-		if used == 0 {
+	for i, slots := range result.SlotsUsed {
+		replicas := 0
+		for _, used := range slots {
+			if used {
+				replicas++
+			}
+		}
+		if replicas == 0 {
 			continue
 		}
-		provisionedCPU := float64(used) * mds[i].GetCPU()
-		provisionedMem := float64(used) * mds[i].GetMemory()
+		provisionedCPU := float64(replicas) * mds[i].GetCPU()
+		provisionedMem := float64(replicas) * mds[i].GetMemory()
 
 		wasteCPU := provisionedCPU - mdCPUUsed[i]
 		wasteMem := provisionedMem - mdMemUsed[i]
@@ -417,10 +435,11 @@ func main() {
 	}
 
 	fmt.Println("\nPod Assignments:")
-	for i, mdIdx := range result.Assignments {
+	for i, assignment := range result.PodAssignments {
 		p := pods[i]
-		fmt.Printf("Pod %02d (CPU: %.1f, Mem: %.1f) → %s\n",
-			i, p.GetCPU(), p.GetMemory(), mds[mdIdx].GetName())
+		md := mds[assignment.MD]
+		fmt.Printf("Pod %02d (CPU: %.1f, Mem: %.1f) → %s (slot %d)\n",
+			i, p.GetCPU(), p.GetMemory(), md.GetName(), assignment.Slot)
 	}
 
 	fmt.Printf("\nTotal Waste:\n  CPU:    %.2f cores\n  Memory: %.2f GiB\n", totalWasteCPU, totalWasteMem)

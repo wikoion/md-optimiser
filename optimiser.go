@@ -9,6 +9,7 @@ package optimiser
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #ifndef RTLD_DEFAULT
 #define RTLD_DEFAULT ((void *) 0)
@@ -43,21 +44,26 @@ typedef struct {
 } SolverResult;
 
 // C wrapper function that dynamically calls OptimisePlacement
-SolverResult call_optimise_placement_dynamic(
+SolverResult call_optimise_placement_with_handle(
+    void* lib_handle,
     const MachineDeployment* mds, int num_mds,
     const Pod* pods, int num_pods,
     const double* plugin_scores,
     const int* allowed_matrix,
     const int* initial_assignment,
-    int* out_assignments,
-    int* out_nodes_used,
+    int* out_slot_assignments,
+    uint8_t* out_slots_used,
     const int* max_runtime_secs
 ) {
-    // Get the function pointer using dlsym
-    void* sym = dlsym(RTLD_DEFAULT, "OptimisePlacement");
+    // Get the function pointer using dlsym with the specific handle
+    void* sym = dlsym(lib_handle, "OptimisePlacement");
     if (!sym) {
-        SolverResult err_result = {0, 0.0, -1, 0.0};
-        return err_result;
+        // Try with underscore prefix (macOS)
+        sym = dlsym(lib_handle, "_OptimisePlacement");
+        if (!sym) {
+            SolverResult err_result = {0, 0.0, -1, 0.0};
+            return err_result;
+        }
     }
 
     // Cast to the correct function pointer type
@@ -68,7 +74,7 @@ SolverResult call_optimise_placement_dynamic(
         const int*,
         const int*,
         int*,
-        int*,
+        uint8_t*,
         const int*
     );
 
@@ -76,8 +82,8 @@ SolverResult call_optimise_placement_dynamic(
 
     // Call the function
     return func(mds, num_mds, pods, num_pods, plugin_scores,
-                allowed_matrix, initial_assignment, out_assignments,
-                out_nodes_used, max_runtime_secs);
+                allowed_matrix, initial_assignment, out_slot_assignments,
+                out_slots_used, max_runtime_secs);
 }
 */
 import "C"
@@ -113,14 +119,19 @@ type HasSoftAffinity interface {
 	GetSoftAffinityWeights() []float64
 }
 
+type PodSlotAssignment struct {
+	MD   int
+	Slot int
+}
+
 type Result struct {
-	Assignments   []int
-	NodesUsed     []int
-	Succeeded     bool
-	Objective     float64
-	SolverStatus  int
-	SolveTimeSecs float64
-	Message       string
+	PodAssignments []PodSlotAssignment
+	SlotsUsed      [][]bool
+	Succeeded      bool
+	Objective      float64
+	SolverStatus   int
+	SolveTimeSecs  float64
+	Message        string
 }
 
 func makeCIntSlice(data []int) *C.int {
@@ -160,6 +171,11 @@ func OptimisePlacementRaw(
 	}
 
 	numMDs := len(mds)
+	slotsPerMD := make([]int, numMDs)
+	for i, md := range mds {
+		slotsPerMD[i] = md.GetMaxScaleOut()
+	}
+
 	numPods := len(pods)
 
 	cMDs := make([]C.MachineDeployment, numMDs)
@@ -271,39 +287,56 @@ func OptimisePlacementRaw(
 		goHints[i] = C.int(h)
 	}
 
-	outAssign := (*C.int)(C.malloc(C.size_t(numPods) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	outAssign := (*C.int)(C.malloc(C.size_t(numPods*2) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(outAssign))
-	outNodes := (*C.int)(C.malloc(C.size_t(numMDs) * C.size_t(unsafe.Sizeof(C.int(0)))))
-	defer C.free(unsafe.Pointer(outNodes))
 
-	res := C.call_optimise_placement_dynamic(
+	outSlotsUsedCount := 0
+	for _, n := range slotsPerMD {
+		outSlotsUsedCount += n
+	}
+	outSlots := (*C.uint8_t)(C.malloc(C.size_t(outSlotsUsedCount)))
+	defer C.free(unsafe.Pointer(outSlots))
+
+	res := C.call_optimise_placement_with_handle(
+		GetLibHandle(),
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
-		cScores, cAllowed, cHints, outAssign, outNodes, cMaxRuntime,
+		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
 	)
 
+	rawAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[: numPods*2 : numPods*2]
+	assignments := make([]PodSlotAssignment, numPods)
+	for i := 0; i < numPods; i++ {
+		assignments[i] = PodSlotAssignment{
+			MD:   int(rawAssign[i*2]),
+			Slot: int(rawAssign[i*2+1]),
+		}
+	}
+
+	rawSlots := (*[1 << 30]C.uint8_t)(unsafe.Pointer(outSlots))[:outSlotsUsedCount:outSlotsUsedCount]
+	slotsUsed := make([][]bool, numMDs)
+	offset := 0
+	for j := 0; j < numMDs; j++ {
+		slotsUsed[j] = make([]bool, slotsPerMD[j])
+		for k := 0; k < slotsPerMD[j]; k++ {
+			slotsUsed[j][k] = rawSlots[offset] != 0
+			offset++
+		}
+	}
+
 	result := Result{
-		Succeeded:     bool(res.success),
-		Objective:     float64(res.objective),
-		SolverStatus:  int(res.status_code),
-		SolveTimeSecs: float64(res.solve_time_secs),
-		Assignments:   make([]int, numPods),
-		NodesUsed:     make([]int, numMDs),
-		Message:       "",
+		Succeeded:      bool(res.success),
+		Objective:      float64(res.objective),
+		SolverStatus:   int(res.status_code),
+		SolveTimeSecs:  float64(res.solve_time_secs),
+		PodAssignments: assignments,
+		SlotsUsed:      slotsUsed,
+		Message:        "",
 	}
 
 	if !result.Succeeded {
 		result.Message = fmt.Sprintf("Solver failed with status code %d", result.SolverStatus)
 		return result
-	}
-
-	goAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[:numPods:numPods]
-	goNodes := (*[1 << 30]C.int)(unsafe.Pointer(outNodes))[:numMDs:numMDs]
-	for i := 0; i < numPods; i++ {
-		result.Assignments[i] = int(goAssign[i])
-	}
-	for i := 0; i < numMDs; i++ {
-		result.NodesUsed[i] = int(goNodes[i])
 	}
 
 	result.Message = "Optimisation successful"

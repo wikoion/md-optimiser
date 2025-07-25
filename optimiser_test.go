@@ -36,7 +36,7 @@ func (p *mockPod) GetLabel(key string) string       { return p.labels[key] }
 func (p *mockPod) GetAffinityPeers() []int          { return p.affinityPeers }
 func (p *mockPod) GetAffinityRules() []int          { return p.affinityRules }
 func (p *mockPod) GetSoftAffinityPeers() []int      { return p.softAffinityPeers }
-func (p *mockPod) GetSoftAffinityValues() []float64 { return p.softAffinityValues }
+func (p *mockPod) GetSoftAffinityWeights() []float64 { return p.softAffinityValues }
 
 func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 	mds := []optimiser.MachineDeployment{}
@@ -202,5 +202,78 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	}
 	if matched, _ := regexp.MatchString("failed", result.Message); !matched {
 		t.Errorf("Expected failure message, got: %s", result.Message)
+	}
+}
+
+func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
+	// 1 MD with 3 slots, 3 pods with mutual anti-affinity
+	// This should be feasible - each pod gets its own slot
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-large", cpu: 16, memory: 64, maxScaleOut: 3},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{
+			cpu:           2, 
+			memory:        4,
+			affinityPeers: []int{1, 2},     // anti-affinity with pods 1 and 2
+			affinityRules: []int{-1, -1},   // -1 means anti-affinity
+		},
+		&mockPod{
+			cpu:           2, 
+			memory:        4,
+			affinityPeers: []int{0, 2},     // anti-affinity with pods 0 and 2
+			affinityRules: []int{-1, -1},   // -1 means anti-affinity
+		},
+		&mockPod{
+			cpu:           2, 
+			memory:        4,
+			affinityPeers: []int{0, 1},     // anti-affinity with pods 0 and 1
+			affinityRules: []int{-1, -1},   // -1 means anti-affinity
+		},
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	// All pods can be placed on the single MD
+	allowed := make([]int, numPods*numMDs)
+	for i := range allowed {
+		allowed[i] = 1
+	}
+	scores := []float64{0.5}
+	initial := make([]int, numPods)
+
+	runtime := 15
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
+
+	if !result.Succeeded {
+		t.Fatalf("Expected success with 3 pods, 3 slots, anti-affinity. Got failure: %s", result.Message)
+	}
+
+	// Verify each pod is on a different slot
+	slots := make(map[int]bool)
+	for i, assignment := range result.PodAssignments {
+		if assignment.MD != 0 {
+			t.Errorf("Pod %d assigned to MD %d, expected MD 0", i, assignment.MD)
+		}
+		if slots[assignment.Slot] {
+			t.Errorf("Pod %d assigned to slot %d, which is already occupied", i, assignment.Slot)
+		}
+		slots[assignment.Slot] = true
+	}
+
+	// Should use exactly 3 slots
+	usedSlots := 0
+	for _, used := range result.SlotsUsed[0] {
+		if used {
+			usedSlots++
+		}
+	}
+	assert.Equal(t, 3, usedSlots, "Expected exactly 3 slots to be used")
+
+	t.Logf("Anti-affinity test successful:")
+	for i, assignment := range result.PodAssignments {
+		t.Logf("  Pod %d → MD %d Slot %d", i, assignment.MD, assignment.Slot)
 	}
 }

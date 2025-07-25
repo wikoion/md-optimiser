@@ -127,7 +127,6 @@ type PodSlotAssignment struct {
 type Result struct {
 	PodAssignments []PodSlotAssignment
 	SlotsUsed      [][]bool
-	SlotsPerMD     []int
 	Succeeded      bool
 	Objective      float64
 	SolverStatus   int
@@ -332,7 +331,6 @@ func OptimisePlacementRaw(
 		SolveTimeSecs:  float64(res.solve_time_secs),
 		PodAssignments: assignments,
 		SlotsUsed:      slotsUsed,
-		SlotsPerMD:     slotsPerMD,
 		Message:        "",
 	}
 

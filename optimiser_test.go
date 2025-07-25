@@ -71,7 +71,7 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 			allowed = append(allowed, 1)
 		}
 	}
-	initial := make([]int, numPods)
+	initial := make([][][]int, 0)
 
 	runtime := 15
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
@@ -139,7 +139,7 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 		}
 	}
 	scores := []float64{0.3, 0.5, 0.8}
-	initial := make([]int, numPods)
+	initial := make([][][]int, 0)
 
 	runtime := 15
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
@@ -165,7 +165,7 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 
 	allowed := []int{1, 1, 1}
 	scores := []float64{0.0}
-	initial := []int{0, 0, 0}
+	initial := make([][][]int, 0)
 
 	runtime := 15
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
@@ -189,7 +189,7 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 
 	scores := []float64{0.0}
 	allowed := []int{0}
-	initial := []int{0}
+	initial := make([][][]int, 0)
 
 	runtime := 15
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
@@ -242,7 +242,7 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 		allowed[i] = 1
 	}
 	scores := []float64{0.5}
-	initial := make([]int, numPods)
+	initial := make([][][]int, 0)
 
 	runtime := 15
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)

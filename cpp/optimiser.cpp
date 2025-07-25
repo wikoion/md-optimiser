@@ -126,10 +126,15 @@ SolverResult OptimisePlacement(
     }
 
     if (initial_assignment != nullptr) {
+        int offset = 0;
         for (int i = 0; i < num_pods; ++i) {
-            int hint_md = initial_assignment[i];
-            if (hint_md >= 0 && hint_md < num_mds && allowed_matrix[i * num_mds + hint_md] && slots_per_md[hint_md] > 0) {
-                model.AddHint(x[i][hint_md][0], 1);
+            for (int j = 0; j < num_mds; ++j) {
+                for (int k = 0; k < slots_per_md[j]; ++k) {
+                    if (initial_assignment[offset] == 1 && allowed_matrix[i * num_mds + j]) {
+                        model.AddHint(x[i][j][k], 1);
+                    }
+                    offset++;
+                }
             }
         }
     }

@@ -163,7 +163,7 @@ func OptimisePlacementRaw(
 	pods []Pod,
 	pluginScores []float64,
 	allowedMatrix []int,
-	initialAssignment []int,
+	initialAssignment [][][]int,
 	maxRuntimeSeconds *int,
 ) Result {
 	if err := extractAndLoadSharedLibrary(); err != nil {
@@ -280,11 +280,31 @@ func OptimisePlacementRaw(
 		goAllowed[i] = C.int(val)
 	}
 
-	cHints := (*C.int)(C.malloc(C.size_t(len(initialAssignment)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	// Calculate total size for flattened 3D matrix
+	totalHintSize := 0
+	for range pods {
+		for j := range mds {
+			totalHintSize += slotsPerMD[j]
+		}
+	}
+	
+	cHints := (*C.int)(C.malloc(C.size_t(totalHintSize) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(cHints))
-	goHints := (*[1 << 30]C.int)(unsafe.Pointer(cHints))[:len(initialAssignment):len(initialAssignment)]
-	for i, h := range initialAssignment {
-		goHints[i] = C.int(h)
+	goHints := (*[1 << 30]C.int)(unsafe.Pointer(cHints))[:totalHintSize:totalHintSize]
+	
+	// Flatten 3D matrix: hints[pod][md][slot] -> flat array
+	offset := 0
+	for i := range pods {
+		for j := range mds {
+			for k := 0; k < slotsPerMD[j]; k++ {
+				if len(initialAssignment) > i && len(initialAssignment[i]) > j && len(initialAssignment[i][j]) > k {
+					goHints[offset] = C.int(initialAssignment[i][j][k])
+				} else {
+					goHints[offset] = C.int(0)
+				}
+				offset++
+			}
+		}
 	}
 
 	outAssign := (*C.int)(C.malloc(C.size_t(numPods*2) * C.size_t(unsafe.Sizeof(C.int(0)))))
@@ -315,7 +335,7 @@ func OptimisePlacementRaw(
 
 	rawSlots := (*[1 << 30]C.uint8_t)(unsafe.Pointer(outSlots))[:outSlotsUsedCount:outSlotsUsedCount]
 	slotsUsed := make([][]bool, numMDs)
-	offset := 0
+	offset = 0
 	for j := range numMDs {
 		slotsUsed[j] = make([]bool, slotsPerMD[j])
 		for k := 0; k < slotsPerMD[j]; k++ {

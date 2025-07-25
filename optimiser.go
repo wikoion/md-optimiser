@@ -127,6 +127,7 @@ type PodSlotAssignment struct {
 type Result struct {
 	PodAssignments []PodSlotAssignment
 	SlotsUsed      [][]bool
+	SlotsPerMD     []int
 	Succeeded      bool
 	Objective      float64
 	SolverStatus   int
@@ -306,7 +307,7 @@ func OptimisePlacementRaw(
 
 	rawAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[: numPods*2 : numPods*2]
 	assignments := make([]PodSlotAssignment, numPods)
-	for i := 0; i < numPods; i++ {
+	for i := range numPods {
 		assignments[i] = PodSlotAssignment{
 			MD:   int(rawAssign[i*2]),
 			Slot: int(rawAssign[i*2+1]),
@@ -316,7 +317,7 @@ func OptimisePlacementRaw(
 	rawSlots := (*[1 << 30]C.uint8_t)(unsafe.Pointer(outSlots))[:outSlotsUsedCount:outSlotsUsedCount]
 	slotsUsed := make([][]bool, numMDs)
 	offset := 0
-	for j := 0; j < numMDs; j++ {
+	for j := range numMDs {
 		slotsUsed[j] = make([]bool, slotsPerMD[j])
 		for k := 0; k < slotsPerMD[j]; k++ {
 			slotsUsed[j][k] = rawSlots[offset] != 0
@@ -331,6 +332,7 @@ func OptimisePlacementRaw(
 		SolveTimeSecs:  float64(res.solve_time_secs),
 		PodAssignments: assignments,
 		SlotsUsed:      slotsUsed,
+		SlotsPerMD:     slotsPerMD,
 		Message:        "",
 	}
 

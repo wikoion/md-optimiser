@@ -287,11 +287,11 @@ func OptimisePlacementRaw(
 			totalHintSize += slotsPerMD[j]
 		}
 	}
-	
+
 	cHints := (*C.int)(C.malloc(C.size_t(totalHintSize) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(cHints))
 	goHints := (*[1 << 30]C.int)(unsafe.Pointer(cHints))[:totalHintSize:totalHintSize]
-	
+
 	// Flatten 3D matrix: hints[pod][md][slot] -> flat array
 	offset := 0
 	for i := range pods {

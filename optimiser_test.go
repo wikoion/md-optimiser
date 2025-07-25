@@ -30,12 +30,12 @@ type mockPod struct {
 	softAffinityValues []float64
 }
 
-func (p *mockPod) GetCPU() float64                  { return p.cpu }
-func (p *mockPod) GetMemory() float64               { return p.memory }
-func (p *mockPod) GetLabel(key string) string       { return p.labels[key] }
-func (p *mockPod) GetAffinityPeers() []int          { return p.affinityPeers }
-func (p *mockPod) GetAffinityRules() []int          { return p.affinityRules }
-func (p *mockPod) GetSoftAffinityPeers() []int      { return p.softAffinityPeers }
+func (p *mockPod) GetCPU() float64                   { return p.cpu }
+func (p *mockPod) GetMemory() float64                { return p.memory }
+func (p *mockPod) GetLabel(key string) string        { return p.labels[key] }
+func (p *mockPod) GetAffinityPeers() []int           { return p.affinityPeers }
+func (p *mockPod) GetAffinityRules() []int           { return p.affinityRules }
+func (p *mockPod) GetSoftAffinityPeers() []int       { return p.softAffinityPeers }
 func (p *mockPod) GetSoftAffinityWeights() []float64 { return p.softAffinityValues }
 
 func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
@@ -214,22 +214,22 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 
 	pods := []optimiser.Pod{
 		&mockPod{
-			cpu:           2, 
+			cpu:           2,
 			memory:        4,
-			affinityPeers: []int{1, 2},     // anti-affinity with pods 1 and 2
-			affinityRules: []int{-1, -1},   // -1 means anti-affinity
+			affinityPeers: []int{1, 2},   // anti-affinity with pods 1 and 2
+			affinityRules: []int{-1, -1}, // -1 means anti-affinity
 		},
 		&mockPod{
-			cpu:           2, 
+			cpu:           2,
 			memory:        4,
-			affinityPeers: []int{0, 2},     // anti-affinity with pods 0 and 2
-			affinityRules: []int{-1, -1},   // -1 means anti-affinity
+			affinityPeers: []int{0, 2},   // anti-affinity with pods 0 and 2
+			affinityRules: []int{-1, -1}, // -1 means anti-affinity
 		},
 		&mockPod{
-			cpu:           2, 
+			cpu:           2,
 			memory:        4,
-			affinityPeers: []int{0, 1},     // anti-affinity with pods 0 and 1
-			affinityRules: []int{-1, -1},   // -1 means anti-affinity
+			affinityPeers: []int{0, 1},   // anti-affinity with pods 0 and 1
+			affinityRules: []int{-1, -1}, // -1 means anti-affinity
 		},
 	}
 

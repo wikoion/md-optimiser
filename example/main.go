@@ -283,7 +283,6 @@ func computeAllowedMatrix(pods []optimiser.Pod, mds []optimiser.MachineDeploymen
 func computeInitialAssignments(
 	pods []optimiser.Pod,
 	mds []optimiser.MachineDeployment,
-	allowed [][]int,
 	scores []float64,
 ) [][][]int {
 	type podIdx struct {
@@ -327,16 +326,6 @@ func computeInitialAssignments(
 	return initial
 }
 
-// contains reports whether val appears in slice.
-func contains(slice []int, val int) bool {
-	for _, x := range slice {
-		if x == val {
-			return true
-		}
-	}
-	return false
-}
-
 // main executes the full optimisation flow with example data.
 // This includes plugin-based scoring, constraint generation, warm start, and final solver execution.
 func main() {
@@ -352,8 +341,8 @@ func main() {
 	stats := calculatePodStats(pods)
 	scores := computeScores(mds, stats, plugins)
 
-	allowedMatrix, allowedMDs := computeAllowedMatrix(pods, mds)
-	initial := computeInitialAssignments(pods, mds, allowedMDs, scores)
+	allowedMatrix, _ := computeAllowedMatrix(pods, mds)
+	initial := computeInitialAssignments(pods, mds, scores)
 
 	start := time.Now()
 	runtime := 15

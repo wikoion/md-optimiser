@@ -1,21 +1,20 @@
 // Core headers from the OR-Tools Constraint Programming (CP-SAT) solver
 #include "ortools/sat/cp_model.h"
 #include "ortools/sat/cp_model.pb.h"
-#include "ortools/sat/cp_model_utils.h"
 #include "ortools/sat/cp_model_solver.h"
-#include "ortools/util/sorted_interval_list.h"
 
 #include <unordered_set>
 #include <utility>
 #include <vector>
 #include <cmath>
-#include <string>
 #include <iostream>
 #include <cstdint>
 
 // Bring OR-Tools namespace into scope
 using namespace operations_research;
 namespace sat = operations_research::sat;
+
+using namespace std;
 
 namespace std {
     template <>
@@ -62,6 +61,64 @@ struct SolverResult {
     int status_code;
     double solve_time_secs;
 };
+}
+
+class Optimiser {
+private:
+   int num_mds;
+   const MachineDeployment* mds;
+   int num_pods;
+   const Pod* pods;
+   const int* allowed_matrix;
+   sat::CpModelBuilder* model;
+   vector<int> slots_per_md;
+   vector<vector<sat::BoolVar>> slot_used;
+   vector<vector<vector<sat::BoolVar>>> pod_slot_assignment;
+
+public:
+    explicit Optimiser(
+       int num_mds, const MachineDeployment* mds,
+       int num_pods, const Pod* pods,
+       const int* allowed_matrix,
+       sat::CpModelBuilder* model
+    ) : num_mds(num_mds), mds(mds), num_pods(num_pods), pods(pods), allowed_matrix(allowed_matrix),
+        model(model), slots_per_md(num_mds), slot_used(num_mds), pod_slot_assignment(num_pods)
+    {}
+
+    const vector<int>& GetSlotsPerMd() const { return slots_per_md; };
+    const vector<vector<sat::BoolVar>>& GetSlotUsed() const { return slot_used; };
+    const vector<vector<vector<sat::BoolVar>>>& GetPodSlotAssignment() const { return pod_slot_assignment; };
+
+    void InitSlotsUsed() {
+        for (int i = 0; i < num_mds; ++i) {
+            int max_slots = mds[i].max_scale_out;
+            slots_per_md[i] = max_slots;
+            slot_used[i].resize(max_slots);
+            for (int j = 0; j < max_slots; ++j) {
+                slot_used[i][j] = model->NewBoolVar();
+            }
+        }
+    };
+
+    // init_pod_slot_assignment_matrix creates a zeroed 3d matrix/tensor of pods(int) to slots_used 
+    // (mds int to md slots boolvar)
+    void InitPodSlotAssignment() {
+        for (int i = 0; i < num_pods; ++i) {
+            pod_slot_assignment[i].resize(num_mds);
+            for (int j = 0; j < num_mds; ++j) {
+                if (!allowed_matrix[i * num_mds + j]) continue;
+                int slots = slots_per_md[j];
+                pod_slot_assignment[i][j].resize(slots);
+                for (int k = 0; k < slots; ++k) {
+                    pod_slot_assignment[i][j][k] = model->NewBoolVar();
+                }
+            }
+        }
+    };
+
+};
+
+extern "C" {
 
 __attribute__((visibility("default")))
 SolverResult OptimisePlacement(
@@ -77,30 +134,15 @@ SolverResult OptimisePlacement(
     SolverResult result;
     sat::CpModelBuilder model;
 
-    std::vector<int> slots_per_md(num_mds);
-    std::vector<std::vector<std::vector<sat::BoolVar>>> x(num_pods);
-    std::vector<std::vector<sat::BoolVar>> slot_used(num_mds);
+    Optimiser optimiser = Optimiser(num_mds, mds, num_pods, pods, allowed_matrix, &model);
 
-    for (int j = 0; j < num_mds; ++j) {
-        int max_slots = mds[j].max_scale_out;
-        slots_per_md[j] = max_slots;
-        slot_used[j].resize(max_slots);
-        for (int k = 0; k < max_slots; ++k) {
-            slot_used[j][k] = model.NewBoolVar();
-        }
-    }
 
-    for (int i = 0; i < num_pods; ++i) {
-        x[i].resize(num_mds);
-        for (int j = 0; j < num_mds; ++j) {
-            if (!allowed_matrix[i * num_mds + j]) continue;
-            int slots = slots_per_md[j];
-            x[i][j].resize(slots);
-            for (int k = 0; k < slots; ++k) {
-                x[i][j][k] = model.NewBoolVar();
-            }
-        }
-    }
+    optimiser.InitSlotsUsed();
+    optimiser.InitPodSlotAssignment();
+    
+    auto slots_per_md = optimiser.GetSlotsPerMd();
+    auto pod_slot_assignment = optimiser.GetPodSlotAssignment();
+    auto slot_used = optimiser.GetSlotUsed();
 
     std::unordered_set<std::pair<int, int>> affinity_seen;
     for (int i = 0; i < num_pods; ++i) {
@@ -116,9 +158,9 @@ SolverResult OptimisePlacement(
                 int slots = slots_per_md[j];
                 for (int k = 0; k < slots; ++k) {
                     if (rule == 1) {
-                        model.AddEquality(x[i][j][k], x[other][j][k]);
+                        model.AddEquality(pod_slot_assignment[i][j][k], pod_slot_assignment[other][j][k]);
                     } else {
-                        model.AddBoolOr({x[i][j][k].Not(), x[other][j][k].Not()});
+                        model.AddBoolOr({pod_slot_assignment[i][j][k].Not(), pod_slot_assignment[other][j][k].Not()});
                     }
                 }
             }
@@ -131,7 +173,7 @@ SolverResult OptimisePlacement(
             for (int j = 0; j < num_mds; ++j) {
                 for (int k = 0; k < slots_per_md[j]; ++k) {
                     if (initial_assignment[offset] == 1 && allowed_matrix[i * num_mds + j]) {
-                        model.AddHint(x[i][j][k], 1);
+                        model.AddHint(pod_slot_assignment[i][j][k], 1);
                     }
                     offset++;
                 }
@@ -144,7 +186,7 @@ SolverResult OptimisePlacement(
         for (int j = 0; j < num_mds; ++j) {
             if (!allowed_matrix[i * num_mds + j]) continue;
             for (int k = 0; k < slots_per_md[j]; ++k) {
-                choices.push_back(x[i][j][k]);
+                choices.push_back(pod_slot_assignment[i][j][k]);
             }
         }
         model.AddEquality(sat::LinearExpr::Sum(choices), 1);
@@ -157,9 +199,9 @@ SolverResult OptimisePlacement(
             sat::LinearExpr cpu_sum, mem_sum, assigned;
             for (int i = 0; i < num_pods; ++i) {
                 if (!allowed_matrix[i * num_mds + j]) continue;
-                cpu_sum += x[i][j][k] * static_cast<int>(pods[i].cpu * 100);
-                mem_sum += x[i][j][k] * static_cast<int>(pods[i].memory * 100);
-                assigned += x[i][j][k];
+                cpu_sum += pod_slot_assignment[i][j][k] * static_cast<int>(pods[i].cpu * 100);
+                mem_sum += pod_slot_assignment[i][j][k] * static_cast<int>(pods[i].memory * 100);
+                assigned += pod_slot_assignment[i][j][k];
             }
             model.AddLessOrEqual(cpu_sum, static_cast<int>(mds[j].cpu * 100));
             model.AddLessOrEqual(mem_sum, static_cast<int>(mds[j].memory * 100));
@@ -193,11 +235,11 @@ SolverResult OptimisePlacement(
                 for (int k = 0; k < slots; ++k) {
                     sat::BoolVar penalty = model.NewBoolVar();
                     if (rule == 1) {
-                        model.AddBoolOr({x[i][j][k].Not(), x[peer][j][k].Not()}).OnlyEnforceIf(penalty);
-                        model.AddBoolAnd({x[i][j][k], x[peer][j][k]}).OnlyEnforceIf(penalty.Not());
+                        model.AddBoolOr({pod_slot_assignment[i][j][k].Not(), pod_slot_assignment[peer][j][k].Not()}).OnlyEnforceIf(penalty);
+                        model.AddBoolAnd({pod_slot_assignment[i][j][k], pod_slot_assignment[peer][j][k]}).OnlyEnforceIf(penalty.Not());
                     } else {
-                        model.AddBoolAnd({x[i][j][k], x[peer][j][k]}).OnlyEnforceIf(penalty);
-                        model.AddBoolOr({x[i][j][k].Not(), x[peer][j][k].Not()}).OnlyEnforceIf(penalty.Not());
+                        model.AddBoolAnd({pod_slot_assignment[i][j][k], pod_slot_assignment[peer][j][k]}).OnlyEnforceIf(penalty);
+                        model.AddBoolOr({pod_slot_assignment[i][j][k].Not(), pod_slot_assignment[peer][j][k].Not()}).OnlyEnforceIf(penalty.Not());
                     }
                     total_penalty += penalty * scaled_weight;
                 }
@@ -243,7 +285,7 @@ SolverResult OptimisePlacement(
         for (int j = 0; j < num_mds; ++j) {
             if (!allowed_matrix[i * num_mds + j]) continue;
             for (int k = 0; k < slots_per_md[j]; ++k) {
-                if (sat::SolutionBooleanValue(response, x[i][j][k])) {
+                if (sat::SolutionBooleanValue(response, pod_slot_assignment[i][j][k])) {
                     out_slot_assignments[i * 2] = j;
                     out_slot_assignments[i * 2 + 1] = k;
                     goto assigned;

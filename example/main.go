@@ -117,7 +117,6 @@ func (p *FewestNodesPlugin) Score(md optimiser.MachineDeployment, stats PodStats
 	return 1.0 / nodesNeeded
 }
 
-
 // RegexMatchPlugin scores MDs that match a name pattern.
 // This can be used to express preferences (e.g., certain instance families).
 // Should be used sparingly to avoid overfitting scoring.

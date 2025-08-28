@@ -175,14 +175,13 @@ public:
             }
         }
         
-        // Combine objectives with weights
-        // Scale weights to integer domain for precision
-        int waste_weight_scaled = static_cast<int>(waste_weight * 700.0);      // 0.7 -> 490
-        int plugin_weight_scaled = static_cast<int>((1.0 - waste_weight) * 300.0);  // 0.3 -> 90
+        // Treat waste and plugin scores equally
+        // Both get the same weight scaling for fair comparison
+        int objective_scale = 1000;
         
         sat::LinearExpr combined_objective;
-        combined_objective += waste_objective * waste_weight_scaled;  // Waste minimization (70%)
-        combined_objective += plugin_objective * plugin_weight_scaled;  // Plugin scores (30%)
+        combined_objective += waste_objective * objective_scale;  // Waste minimization
+        combined_objective += plugin_objective * objective_scale;  // Plugin scores
         combined_objective += soft_penalty * 250;  // Soft affinity penalties
         
         return combined_objective;

@@ -256,7 +256,7 @@ func OptimisePlacementRaw(
 		}
 	}
 
-	// Defatul to 15s
+	// Default to 15s
 	if maxRuntimeSeconds == nil {
 		defaultRuntime := 15
 		maxRuntimeSeconds = &defaultRuntime

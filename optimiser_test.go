@@ -37,6 +37,7 @@ func (p *mockPod) GetAffinityPeers() []int           { return p.affinityPeers }
 func (p *mockPod) GetAffinityRules() []int           { return p.affinityRules }
 func (p *mockPod) GetSoftAffinityPeers() []int       { return p.softAffinityPeers }
 func (p *mockPod) GetSoftAffinityWeights() []float64 { return p.softAffinityValues }
+func (p *mockPod) GetCurrentMDAssignment() int       { return -1 } // Default: unknown assignment
 
 func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 	mds := []optimiser.MachineDeployment{}
@@ -74,7 +75,7 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
 	if !result.Succeeded {
 		t.Fatalf("Expected success: %s", result.Message)
 	}
@@ -142,7 +143,7 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -168,7 +169,7 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -192,7 +193,7 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
 
 	if result.Succeeded {
 		t.Fatalf("Expected failure due to incompatibility, got success")
@@ -245,7 +246,7 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success with 3 pods, 3 slots, anti-affinity. Got failure: %s", result.Message)

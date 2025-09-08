@@ -34,6 +34,8 @@ typedef struct {
     const int* soft_peers;        // soft affinity peer indices
     const double* soft_affinities;// weights (positive = colocate, negative = spread)
     int soft_affinity_count;
+    
+    int current_md_assignment;   // Index of MD this pod is currently placed on (-1 if unknown)
 } Pod;
 
 typedef struct {
@@ -41,6 +43,8 @@ typedef struct {
     double objective;       // Objective value of the solution
     int status_code;        // Solver status (e.g., 2 = feasible)
     double solve_time_secs; // Time solver spent in seconds
+    double current_state_cost; // Cost of current state before optimization
+    _Bool already_optimal;     // True if improvement doesn't meet threshold
 } SolverResult;
 
 // C wrapper function that dynamically calls OptimisePlacement
@@ -53,7 +57,8 @@ SolverResult call_optimise_placement_with_handle(
     const int* initial_assignment,
     int* out_slot_assignments,
     uint8_t* out_slots_used,
-    const int* max_runtime_secs
+    const int* max_runtime_secs,
+    const double* improvement_threshold
 ) {
     // Get the function pointer using dlsym with the specific handle
     void* sym = dlsym(lib_handle, "OptimisePlacement");
@@ -61,7 +66,7 @@ SolverResult call_optimise_placement_with_handle(
         // Try with underscore prefix (macOS)
         sym = dlsym(lib_handle, "_OptimisePlacement");
         if (!sym) {
-            SolverResult err_result = {0, 0.0, -1, 0.0};
+            SolverResult err_result = {0, 0.0, -1, 0.0, 0.0, 0};
             return err_result;
         }
     }
@@ -75,7 +80,8 @@ SolverResult call_optimise_placement_with_handle(
         const int*,
         int*,
         uint8_t*,
-        const int*
+        const int*,
+        const double*
     );
 
     OptimisePlacementFunc func = (OptimisePlacementFunc)sym;
@@ -83,7 +89,7 @@ SolverResult call_optimise_placement_with_handle(
     // Call the function
     return func(mds, num_mds, pods, num_pods, plugin_scores,
                 allowed_matrix, initial_assignment, out_slot_assignments,
-                out_slots_used, max_runtime_secs);
+                out_slots_used, max_runtime_secs, improvement_threshold);
 }
 */
 import "C"
@@ -107,6 +113,7 @@ type Pod interface {
 	GetCPU() float64
 	GetMemory() float64
 	GetLabel(string) string
+	GetCurrentMDAssignment() int // Returns MD index (-1 if unknown)
 }
 
 type HasHardAffinity interface {
@@ -125,13 +132,15 @@ type PodSlotAssignment struct {
 }
 
 type Result struct {
-	PodAssignments []PodSlotAssignment
-	SlotsUsed      [][]bool
-	Succeeded      bool
-	Objective      float64
-	SolverStatus   int
-	SolveTimeSecs  float64
-	Message        string
+	PodAssignments   []PodSlotAssignment
+	SlotsUsed        [][]bool
+	Succeeded        bool
+	Objective        float64
+	SolverStatus     int
+	SolveTimeSecs    float64
+	Message          string
+	CurrentStateCost float64 // Cost of the current state before optimization
+	AlreadyOptimal   bool    // True if improvement doesn't meet threshold
 }
 
 func makeCIntSlice(data []int) *C.int {
@@ -165,6 +174,7 @@ func OptimisePlacementRaw(
 	allowedMatrix []int,
 	initialAssignment [][][]int,
 	maxRuntimeSeconds *int,
+	improvementThreshold *float64,
 ) Result {
 	if err := extractAndLoadSharedLibrary(); err != nil {
 		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
@@ -245,14 +255,15 @@ func OptimisePlacementRaw(
 		}
 
 		cPods[i] = C.Pod{
-			cpu:                 C.double(base.GetCPU()),
-			memory:              C.double(base.GetMemory()),
-			affinity_peers:      cPeers,
-			affinity_rules:      cRules,
-			affinity_count:      C.int(len(peers)),
-			soft_peers:          cSoftPeers,
-			soft_affinities:     cSoftWeights,
-			soft_affinity_count: C.int(len(softPeers)),
+			cpu:                   C.double(base.GetCPU()),
+			memory:                C.double(base.GetMemory()),
+			affinity_peers:        cPeers,
+			affinity_rules:        cRules,
+			affinity_count:        C.int(len(peers)),
+			soft_peers:            cSoftPeers,
+			soft_affinities:       cSoftWeights,
+			soft_affinity_count:   C.int(len(softPeers)),
+			current_md_assignment: C.int(base.GetCurrentMDAssignment()),
 		}
 	}
 
@@ -265,6 +276,13 @@ func OptimisePlacementRaw(
 	cMaxRuntime := (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
 	*cMaxRuntime = C.int(*maxRuntimeSeconds)
 	defer C.free(unsafe.Pointer(cMaxRuntime))
+
+	var cImprovementThreshold *C.double
+	if improvementThreshold != nil {
+		cImprovementThreshold = (*C.double)(C.malloc(C.size_t(unsafe.Sizeof(C.double(0)))))
+		*cImprovementThreshold = C.double(*improvementThreshold)
+		defer C.free(unsafe.Pointer(cImprovementThreshold))
+	}
 
 	cScores := (*C.double)(C.malloc(C.size_t(len(pluginScores)) * C.size_t(unsafe.Sizeof(C.double(0)))))
 	defer C.free(unsafe.Pointer(cScores))
@@ -322,6 +340,7 @@ func OptimisePlacementRaw(
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
+		cImprovementThreshold,
 	)
 
 	rawAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[: numPods*2 : numPods*2]
@@ -345,13 +364,15 @@ func OptimisePlacementRaw(
 	}
 
 	result := Result{
-		Succeeded:      bool(res.success),
-		Objective:      float64(res.objective),
-		SolverStatus:   int(res.status_code),
-		SolveTimeSecs:  float64(res.solve_time_secs),
-		PodAssignments: assignments,
-		SlotsUsed:      slotsUsed,
-		Message:        "",
+		Succeeded:        bool(res.success),
+		Objective:        float64(res.objective),
+		SolverStatus:     int(res.status_code),
+		SolveTimeSecs:    float64(res.solve_time_secs),
+		PodAssignments:   assignments,
+		SlotsUsed:        slotsUsed,
+		Message:          "",
+		CurrentStateCost: float64(res.current_state_cost),
+		AlreadyOptimal:   bool(res.already_optimal),
 	}
 
 	if !result.Succeeded {

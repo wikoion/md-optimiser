@@ -45,6 +45,7 @@ struct Pod {
     const int* soft_peers;
     const double* soft_affinities;
     int soft_affinity_count;
+    int current_md_assignment; // Index of MD this pod is currently placed on (-1 if unknown)
 };
 
 enum SolverStatus {
@@ -60,6 +61,8 @@ struct SolverResult {
     double objective;
     int status_code;
     double solve_time_secs;
+    double current_state_cost;  // Cost of current state before optimization
+    bool already_optimal;       // True if improvement doesn't meet threshold
 };
 }
 
@@ -129,7 +132,8 @@ SolverResult OptimisePlacement(
     const int* initial_assignment,
     int* out_slot_assignments,
     uint8_t* out_slots_used,
-    const int* max_runtime_secs
+    const int* max_runtime_secs,
+    const double* improvement_threshold
 ) {
     SolverResult result;
     sat::CpModelBuilder model;
@@ -256,6 +260,28 @@ SolverResult OptimisePlacement(
         }
     }
     objective += static_cast<int>(0.25 * 1000.0) * total_penalty;
+    
+    // Calculate current state cost based on where pods are currently assigned
+    double current_state_cost = 0.0;
+    std::vector<bool> md_currently_used(num_mds, false);
+    
+    // Mark which MDs are currently being used
+    for (int i = 0; i < num_pods; ++i) {
+        int current_md = pods[i].current_md_assignment;
+        if (current_md >= 0 && current_md < num_mds) {
+            md_currently_used[current_md] = true;
+        }
+    }
+    
+    // Calculate current cost based on which MDs are currently used
+    for (int j = 0; j < num_mds; ++j) {
+        if (md_currently_used[j]) {
+            int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
+            current_state_cost += weight; // Cost of using this MD (1 node)
+        }
+    }
+    result.current_state_cost = current_state_cost;
+    
     model.Minimize(objective);
 
     sat::Model cp_model;
@@ -278,7 +304,18 @@ SolverResult OptimisePlacement(
 
     if (!result.success) {
         std::cerr << "No solution found.\n";
+        result.already_optimal = false; // Can't be optimal if no solution found
         return result;
+    }
+    
+    // Check if improvement meets threshold
+    result.already_optimal = false;
+    if (improvement_threshold != nullptr && current_state_cost > 0.0) {
+        double improvement_percentage = (current_state_cost - result.objective) / current_state_cost * 100.0;
+        if (improvement_percentage < *improvement_threshold) {
+            result.already_optimal = true;
+            // Still return the solution, but mark it as not meeting threshold
+        }
     }
 
     for (int i = 0; i < num_pods; ++i) {

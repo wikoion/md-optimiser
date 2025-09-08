@@ -66,6 +66,10 @@ func (p *Pod) GetLabel(label string) string {
 	return ""
 }
 
+func (p *Pod) GetCurrentMDAssignment() int {
+	return -1 // Default: unknown assignment for examples
+}
+
 // ScoringPlugin defines an interface for pluggable MD scoring logic.
 // Plugins return a score per MD and are weighted to express relative priority.
 type ScoringPlugin interface {
@@ -346,7 +350,7 @@ func main() {
 
 	start := time.Now()
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, &runtime)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, &runtime, nil)
 	duration := time.Since(start)
 
 	fmt.Printf("\nResult: %s\nStatus Code: %d\nObjective: %.2f\nSolve Time: %.2fs\nDuration (Go): %s\n",

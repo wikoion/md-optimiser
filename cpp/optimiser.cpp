@@ -77,6 +77,11 @@ private:
    vector<int> slots_per_md;
    vector<vector<sat::BoolVar>> slot_used;
    vector<vector<vector<sat::BoolVar>>> pod_slot_assignment;
+   
+   // Resource tracking for waste calculation
+   vector<sat::LinearExpr> md_cpu_assigned;
+   vector<sat::LinearExpr> md_mem_assigned;
+   vector<sat::LinearExpr> md_nodes_used;
 
 public:
     explicit Optimiser(
@@ -85,7 +90,8 @@ public:
        const int* allowed_matrix,
        sat::CpModelBuilder* model
     ) : num_mds(num_mds), mds(mds), num_pods(num_pods), pods(pods), allowed_matrix(allowed_matrix),
-        model(model), slots_per_md(num_mds), slot_used(num_mds), pod_slot_assignment(num_pods)
+        model(model), slots_per_md(num_mds), slot_used(num_mds), pod_slot_assignment(num_pods),
+        md_cpu_assigned(num_mds), md_mem_assigned(num_mds), md_nodes_used(num_mds)
     {}
 
     const vector<int>& GetSlotsPerMd() const { return slots_per_md; };
@@ -118,6 +124,71 @@ public:
             }
         }
     };
+    
+    // Track resource assignments for waste calculation
+    void TrackResourceAssignments(int md_idx, int slot_idx, 
+                                   const sat::LinearExpr& cpu_sum, 
+                                   const sat::LinearExpr& mem_sum) {
+        md_cpu_assigned[md_idx] += cpu_sum;
+        md_mem_assigned[md_idx] += mem_sum;
+    }
+    
+    // Set the number of nodes used for an MD
+    void SetNodesUsed(int md_idx, const sat::LinearExpr& nodes_used) {
+        md_nodes_used[md_idx] = nodes_used;
+    }
+    
+    // Calculate waste objective for all MDs
+    sat::LinearExpr CalculateWasteObjective() {
+        sat::LinearExpr total_waste;
+        
+        for (int j = 0; j < num_mds; ++j) {
+            // Calculate provisioned resources (nodes_used * capacity)
+            sat::LinearExpr cpu_provisioned = md_nodes_used[j] * static_cast<int>(mds[j].cpu * 100);
+            sat::LinearExpr mem_provisioned = md_nodes_used[j] * static_cast<int>(mds[j].memory * 100);
+            
+            // Calculate waste (provisioned - assigned)
+            // Note: md_cpu_assigned and md_mem_assigned are already scaled by 100
+            sat::LinearExpr cpu_waste = cpu_provisioned - md_cpu_assigned[j];
+            sat::LinearExpr mem_waste = mem_provisioned - md_mem_assigned[j];
+            
+            // Add normalized waste to total
+            // We normalize by dividing by capacity, but since we're in integer domain,
+            // we keep the scale factor
+            total_waste += cpu_waste + mem_waste;
+        }
+        
+        return total_waste;
+    }
+    
+    // Build combined objective with waste and plugin scores
+    sat::LinearExpr BuildCombinedObjective(const double* plugin_scores, 
+                                           const sat::LinearExpr& soft_penalty,
+                                           double waste_weight = 0.7) {
+        // Calculate waste objective
+        sat::LinearExpr waste_objective = CalculateWasteObjective();
+        
+        // Calculate plugin score objective
+        sat::LinearExpr plugin_objective;
+        for (int j = 0; j < num_mds; ++j) {
+            // Original logic: higher plugin score = lower cost
+            int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
+            for (int k = 0; k < slots_per_md[j]; ++k) {
+                plugin_objective += slot_used[j][k] * weight;
+            }
+        }
+        
+        // Treat waste and plugin scores equally
+        // Both get the same weight scaling for fair comparison
+        int objective_scale = 1000;
+        
+        sat::LinearExpr combined_objective;
+        combined_objective += waste_objective * objective_scale;  // Waste minimization
+        combined_objective += plugin_objective * objective_scale;  // Plugin scores
+        combined_objective += soft_penalty * 250;  // Soft affinity penalties
+        
+        return combined_objective;
+    }
 
 };
 
@@ -212,8 +283,15 @@ SolverResult OptimisePlacement(
             model.AddGreaterThan(assigned, 0).OnlyEnforceIf(slot_used[j][k]);
             model.AddEquality(assigned, 0).OnlyEnforceIf(slot_used[j][k].Not());
             used_sum += slot_used[j][k];
+            
+            // Track resource assignments for waste calculation
+            optimiser.TrackResourceAssignments(j, k, cpu_sum, mem_sum);
         }
         model.AddLessOrEqual(used_sum, mds[j].max_scale_out);
+        
+        // Set the number of nodes used for this MD
+        optimiser.SetNodesUsed(j, used_sum);
+        
         for (int k = 0; k + 1 < slots; ++k) {
             model.AddImplication(slot_used[j][k + 1], slot_used[j][k]);
         }
@@ -251,15 +329,8 @@ SolverResult OptimisePlacement(
         }
     }
 
-    sat::LinearExpr objective;
-    for (int j = 0; j < num_mds; ++j) {
-        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
-        int slots = slots_per_md[j];
-        for (int k = 0; k < slots; ++k) {
-            objective += slot_used[j][k] * weight;
-        }
-    }
-    objective += static_cast<int>(0.25 * 1000.0) * total_penalty;
+    // Build combined objective with waste calculation and plugin scores
+    sat::LinearExpr objective = optimiser.BuildCombinedObjective(plugin_scores, total_penalty, 0.7);
     
     // Calculate current state cost based on where pods are currently assigned
     double current_state_cost = 0.0;
@@ -281,7 +352,6 @@ SolverResult OptimisePlacement(
         }
     }
     result.current_state_cost = current_state_cost;
-    
     model.Minimize(objective);
 
     sat::Model cp_model;

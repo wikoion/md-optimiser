@@ -251,6 +251,7 @@ func convertPods(pods []Pod) ([]C.Pod, []unsafe.Pointer, []unsafe.Pointer) {
 }
 
 func prepareRuntimeParameters(maxRuntimeSeconds *int, improvementThreshold *float64) (*C.int, *C.double, func()) {
+	// Default to 15s
 	if maxRuntimeSeconds == nil {
 		defaultRuntime := 15
 		maxRuntimeSeconds = &defaultRuntime

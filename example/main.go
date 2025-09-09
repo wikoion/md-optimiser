@@ -121,29 +121,6 @@ func (p *FewestNodesPlugin) Score(md optimiser.MachineDeployment, stats PodStats
 	return 1.0 / nodesNeeded
 }
 
-// LeastWastePlugin scores MDs by how closely they match aggregate resource demand.
-// It penalizes overprovisioned combinations (i.e., high unused capacity).
-type LeastWastePlugin struct{ weight float64 }
-
-func (p *LeastWastePlugin) Name() string    { return "LeastWaste" }
-func (p *LeastWastePlugin) Weight() float64 { return p.weight }
-func (p *LeastWastePlugin) Score(md optimiser.MachineDeployment, stats PodStats) float64 {
-	if stats.Count == 0 {
-		return 0
-	}
-	nodesNeeded := math.Max(stats.TotalCPU/md.GetCPU(), stats.TotalMem/md.GetMemory())
-	totalProvisionedCPU := math.Ceil(nodesNeeded) * md.GetCPU()
-	totalProvisionedMem := math.Ceil(nodesNeeded) * md.GetMemory()
-
-	wasteCPU := totalProvisionedCPU - stats.TotalCPU
-	wasteMem := totalProvisionedMem - stats.TotalMem
-	normWasteCPU := wasteCPU / totalProvisionedCPU
-	normWasteMem := wasteMem / totalProvisionedMem
-	wasteRatio := (normWasteCPU + normWasteMem) / 2
-
-	return 1.0 - wasteRatio
-}
-
 // RegexMatchPlugin scores MDs that match a name pattern.
 // This can be used to express preferences (e.g., certain instance families).
 // Should be used sparingly to avoid overfitting scoring.
@@ -338,7 +315,6 @@ func main() {
 
 	plugins := []ScoringPlugin{
 		&FewestNodesPlugin{weight: 0.2},
-		&LeastWastePlugin{weight: 1.0},
 		&RegexMatchPlugin{weight: 0.1, pattern: regexp.MustCompile(`.*-c7i$`)},
 	}
 

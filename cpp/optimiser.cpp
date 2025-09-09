@@ -344,11 +344,31 @@ SolverResult OptimisePlacement(
         }
     }
     
-    // Calculate current cost based on which MDs are currently used
+    // Calculate current cost based on waste from current pod placements
     for (int j = 0; j < num_mds; ++j) {
         if (md_currently_used[j]) {
-            int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
-            current_state_cost += weight; // Cost of using this MD (1 node)
+            // Calculate current resource usage for this MD
+            double cpu_used = 0.0, mem_used = 0.0;
+            for (int i = 0; i < num_pods; ++i) {
+                if (pods[i].current_md_assignment == j) {
+                    cpu_used += pods[i].cpu * 100.0; // Scale to match optimizer
+                    mem_used += pods[i].memory * 100.0;
+                }
+            }
+            
+            // Calculate provisioned resources (assuming 1 node currently)
+            double cpu_provisioned = mds[j].cpu * 100.0;
+            double mem_provisioned = mds[j].memory * 100.0;
+            
+            // Calculate waste 
+            double cpu_waste = cpu_provisioned - cpu_used;
+            double mem_waste = mem_provisioned - mem_used;
+            
+            // Add plugin score component (same as optimized objective)
+            int plugin_weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
+            
+            // Use same scaling as BuildCombinedObjective: waste * 1000 + plugin * 1000
+            current_state_cost += (cpu_waste + mem_waste) * 1000.0 + plugin_weight * 1000.0;
         }
     }
     result.current_state_cost = current_state_cost;

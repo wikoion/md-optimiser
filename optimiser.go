@@ -34,7 +34,7 @@ typedef struct {
     const int* soft_peers;        // soft affinity peer indices
     const double* soft_affinities;// weights (positive = colocate, negative = spread)
     int soft_affinity_count;
-    
+
     int current_md_assignment;   // Index of MD this pod is currently placed on (-1 if unknown)
 } Pod;
 
@@ -167,29 +167,11 @@ func makeCDoubleSlice(data []float64) *C.double {
 	return ptr
 }
 
-func OptimisePlacementRaw(
-	mds []MachineDeployment,
-	pods []Pod,
-	pluginScores []float64,
-	allowedMatrix []int,
-	initialAssignment [][][]int,
-	maxRuntimeSeconds *int,
-	improvementThreshold *float64,
-) Result {
-	if err := extractAndLoadSharedLibrary(); err != nil {
-		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
-	}
-
+func convertMachineDeployments(mds []MachineDeployment) ([]C.MachineDeployment, []*C.char, func()) {
 	numMDs := len(mds)
-	slotsPerMD := make([]int, numMDs)
-	for i, md := range mds {
-		slotsPerMD[i] = md.GetMaxScaleOut()
-	}
-
-	numPods := len(pods)
-
 	cMDs := make([]C.MachineDeployment, numMDs)
 	cNames := make([]*C.char, numMDs)
+
 	for i, md := range mds {
 		cNames[i] = C.CString(md.GetName())
 		cMDs[i] = C.MachineDeployment{
@@ -199,23 +181,21 @@ func OptimisePlacementRaw(
 			max_scale_out: C.int(md.GetMaxScaleOut()),
 		}
 	}
-	defer func() {
+
+	cleanup := func() {
 		for _, cstr := range cNames {
 			C.free(unsafe.Pointer(cstr))
 		}
-	}()
+	}
 
+	return cMDs, cNames, cleanup
+}
+
+func convertPods(pods []Pod) ([]C.Pod, []unsafe.Pointer, []unsafe.Pointer) {
+	numPods := len(pods)
 	cPods := make([]C.Pod, numPods)
 	hardPtrs := []unsafe.Pointer{}
 	softPtrs := []unsafe.Pointer{}
-	defer func() {
-		for _, ptr := range hardPtrs {
-			C.free(ptr)
-		}
-		for _, ptr := range softPtrs {
-			C.free(ptr)
-		}
-	}()
 
 	for i, p := range pods {
 		base := p
@@ -267,7 +247,10 @@ func OptimisePlacementRaw(
 		}
 	}
 
-	// Defatul to 15s
+	return cPods, hardPtrs, softPtrs
+}
+
+func prepareRuntimeParameters(maxRuntimeSeconds *int, improvementThreshold *float64) (*C.int, *C.double, func()) {
 	if maxRuntimeSeconds == nil {
 		defaultRuntime := 15
 		maxRuntimeSeconds = &defaultRuntime
@@ -275,30 +258,45 @@ func OptimisePlacementRaw(
 
 	cMaxRuntime := (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
 	*cMaxRuntime = C.int(*maxRuntimeSeconds)
-	defer C.free(unsafe.Pointer(cMaxRuntime))
 
 	var cImprovementThreshold *C.double
 	if improvementThreshold != nil {
 		cImprovementThreshold = (*C.double)(C.malloc(C.size_t(unsafe.Sizeof(C.double(0)))))
 		*cImprovementThreshold = C.double(*improvementThreshold)
-		defer C.free(unsafe.Pointer(cImprovementThreshold))
 	}
 
+	cleanup := func() {
+		C.free(unsafe.Pointer(cMaxRuntime))
+		if cImprovementThreshold != nil {
+			C.free(unsafe.Pointer(cImprovementThreshold))
+		}
+	}
+
+	return cMaxRuntime, cImprovementThreshold, cleanup
+}
+
+func prepareMatrices(pluginScores []float64, allowedMatrix []int) (*C.double, *C.int, func()) {
 	cScores := (*C.double)(C.malloc(C.size_t(len(pluginScores)) * C.size_t(unsafe.Sizeof(C.double(0)))))
-	defer C.free(unsafe.Pointer(cScores))
 	goScores := (*[1 << 30]C.double)(unsafe.Pointer(cScores))[:len(pluginScores):len(pluginScores)]
 	for i, s := range pluginScores {
 		goScores[i] = C.double(s)
 	}
 
 	cAllowed := (*C.int)(C.malloc(C.size_t(len(allowedMatrix)) * C.size_t(unsafe.Sizeof(C.int(0)))))
-	defer C.free(unsafe.Pointer(cAllowed))
 	goAllowed := (*[1 << 30]C.int)(unsafe.Pointer(cAllowed))[:len(allowedMatrix):len(allowedMatrix)]
 	for i, val := range allowedMatrix {
 		goAllowed[i] = C.int(val)
 	}
 
-	// Calculate total size for flattened 3D matrix
+	cleanup := func() {
+		C.free(unsafe.Pointer(cScores))
+		C.free(unsafe.Pointer(cAllowed))
+	}
+
+	return cScores, cAllowed, cleanup
+}
+
+func prepareHints(pods []Pod, mds []MachineDeployment, slotsPerMD []int, initialAssignment [][][]int) (*C.int, func()) {
 	totalHintSize := 0
 	for range pods {
 		for j := range mds {
@@ -307,10 +305,8 @@ func OptimisePlacementRaw(
 	}
 
 	cHints := (*C.int)(C.malloc(C.size_t(totalHintSize) * C.size_t(unsafe.Sizeof(C.int(0)))))
-	defer C.free(unsafe.Pointer(cHints))
 	goHints := (*[1 << 30]C.int)(unsafe.Pointer(cHints))[:totalHintSize:totalHintSize]
 
-	// Flatten 3D matrix: hints[pod][md][slot] -> flat array
 	offset := 0
 	for i := range pods {
 		for j := range mds {
@@ -325,24 +321,38 @@ func OptimisePlacementRaw(
 		}
 	}
 
+	cleanup := func() {
+		C.free(unsafe.Pointer(cHints))
+	}
+
+	return cHints, cleanup
+}
+
+func prepareOutputBuffers(numPods int, slotsPerMD []int) (*C.int, *C.uint8_t, int, func()) {
 	outAssign := (*C.int)(C.malloc(C.size_t(numPods*2) * C.size_t(unsafe.Sizeof(C.int(0)))))
-	defer C.free(unsafe.Pointer(outAssign))
 
 	outSlotsUsedCount := 0
 	for _, n := range slotsPerMD {
 		outSlotsUsedCount += n
 	}
 	outSlots := (*C.uint8_t)(C.malloc(C.size_t(outSlotsUsedCount)))
-	defer C.free(unsafe.Pointer(outSlots))
 
-	res := C.call_optimise_placement_with_handle(
-		GetLibHandle(),
-		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
-		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
-		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
-		cImprovementThreshold,
-	)
+	cleanup := func() {
+		C.free(unsafe.Pointer(outAssign))
+		C.free(unsafe.Pointer(outSlots))
+	}
 
+	return outAssign, outSlots, outSlotsUsedCount, cleanup
+}
+
+func parseResults(
+	res C.SolverResult,
+	outAssign *C.int,
+	outSlots *C.uint8_t,
+	numPods int,
+	slotsPerMD []int,
+	outSlotsUsedCount int,
+) Result {
 	rawAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[: numPods*2 : numPods*2]
 	assignments := make([]PodSlotAssignment, numPods)
 	for i := range numPods {
@@ -353,9 +363,9 @@ func OptimisePlacementRaw(
 	}
 
 	rawSlots := (*[1 << 30]C.uint8_t)(unsafe.Pointer(outSlots))[:outSlotsUsedCount:outSlotsUsedCount]
-	slotsUsed := make([][]bool, numMDs)
-	offset = 0
-	for j := range numMDs {
+	slotsUsed := make([][]bool, len(slotsPerMD))
+	offset := 0
+	for j := range len(slotsPerMD) {
 		slotsUsed[j] = make([]bool, slotsPerMD[j])
 		for k := 0; k < slotsPerMD[j]; k++ {
 			slotsUsed[j][k] = rawSlots[offset] != 0
@@ -382,4 +392,60 @@ func OptimisePlacementRaw(
 
 	result.Message = "Optimisation successful"
 	return result
+}
+
+func OptimisePlacementRaw(
+	mds []MachineDeployment,
+	pods []Pod,
+	pluginScores []float64,
+	allowedMatrix []int,
+	initialAssignment [][][]int,
+	maxRuntimeSeconds *int,
+	improvementThreshold *float64,
+) Result {
+	if err := extractAndLoadSharedLibrary(); err != nil {
+		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
+	}
+
+	numMDs := len(mds)
+	slotsPerMD := make([]int, numMDs)
+	for i, md := range mds {
+		slotsPerMD[i] = md.GetMaxScaleOut()
+	}
+	numPods := len(pods)
+
+	cMDs, _, cleanupMDs := convertMachineDeployments(mds)
+	defer cleanupMDs()
+
+	cPods, hardPtrs, softPtrs := convertPods(pods)
+	defer func() {
+		for _, ptr := range hardPtrs {
+			C.free(ptr)
+		}
+		for _, ptr := range softPtrs {
+			C.free(ptr)
+		}
+	}()
+
+	cMaxRuntime, cImprovementThreshold, cleanupRuntime := prepareRuntimeParameters(maxRuntimeSeconds, improvementThreshold)
+	defer cleanupRuntime()
+
+	cScores, cAllowed, cleanupMatrices := prepareMatrices(pluginScores, allowedMatrix)
+	defer cleanupMatrices()
+
+	cHints, cleanupHints := prepareHints(pods, mds, slotsPerMD, initialAssignment)
+	defer cleanupHints()
+
+	outAssign, outSlots, outSlotsUsedCount, cleanupOutput := prepareOutputBuffers(numPods, slotsPerMD)
+	defer cleanupOutput()
+
+	res := C.call_optimise_placement_with_handle(
+		GetLibHandle(),
+		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
+		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
+		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
+		cImprovementThreshold,
+	)
+
+	return parseResults(res, outAssign, outSlots, numPods, slotsPerMD, outSlotsUsedCount)
 }

@@ -367,8 +367,8 @@ SolverResult OptimisePlacement(
             // Add plugin score component (same as optimized objective)
             int plugin_weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
             
-            // Use same scaling as BuildCombinedObjective: waste * 1000 + plugin * 1000
-            current_state_cost += (cpu_waste + mem_waste) * 1000.0 + plugin_weight * 1000.0;
+            // Use same scaling as BuildCombinedObjective: waste * 1000 + plugin (already scaled by 1000)
+            current_state_cost += (cpu_waste + mem_waste) * 1000.0 + plugin_weight;
         }
     }
     result.current_state_cost = current_state_cost;

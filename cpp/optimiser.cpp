@@ -45,6 +45,7 @@ struct Pod {
     const int* soft_peers;
     const double* soft_affinities;
     int soft_affinity_count;
+    int current_md_assignment; // Index of MD this pod is currently placed on (-1 if unknown)
 };
 
 enum SolverStatus {
@@ -60,6 +61,8 @@ struct SolverResult {
     double objective;
     int status_code;
     double solve_time_secs;
+    double current_state_cost;  // Cost of current state before optimization
+    bool already_optimal;       // True if improvement doesn't meet threshold
 };
 }
 
@@ -74,6 +77,11 @@ private:
    vector<int> slots_per_md;
    vector<vector<sat::BoolVar>> slot_used;
    vector<vector<vector<sat::BoolVar>>> pod_slot_assignment;
+   
+   // Resource tracking for waste calculation
+   vector<sat::LinearExpr> md_cpu_assigned;
+   vector<sat::LinearExpr> md_mem_assigned;
+   vector<sat::LinearExpr> md_nodes_used;
 
 public:
     explicit Optimiser(
@@ -82,7 +90,8 @@ public:
        const int* allowed_matrix,
        sat::CpModelBuilder* model
     ) : num_mds(num_mds), mds(mds), num_pods(num_pods), pods(pods), allowed_matrix(allowed_matrix),
-        model(model), slots_per_md(num_mds), slot_used(num_mds), pod_slot_assignment(num_pods)
+        model(model), slots_per_md(num_mds), slot_used(num_mds), pod_slot_assignment(num_pods),
+        md_cpu_assigned(num_mds), md_mem_assigned(num_mds), md_nodes_used(num_mds)
     {}
 
     const vector<int>& GetSlotsPerMd() const { return slots_per_md; };
@@ -115,6 +124,71 @@ public:
             }
         }
     };
+    
+    // Track resource assignments for waste calculation
+    void TrackResourceAssignments(int md_idx, int slot_idx, 
+                                   const sat::LinearExpr& cpu_sum, 
+                                   const sat::LinearExpr& mem_sum) {
+        md_cpu_assigned[md_idx] += cpu_sum;
+        md_mem_assigned[md_idx] += mem_sum;
+    }
+    
+    // Set the number of nodes used for an MD
+    void SetNodesUsed(int md_idx, const sat::LinearExpr& nodes_used) {
+        md_nodes_used[md_idx] = nodes_used;
+    }
+    
+    // Calculate waste objective for all MDs
+    sat::LinearExpr CalculateWasteObjective() {
+        sat::LinearExpr total_waste;
+        
+        for (int j = 0; j < num_mds; ++j) {
+            // Calculate provisioned resources (nodes_used * capacity)
+            sat::LinearExpr cpu_provisioned = md_nodes_used[j] * static_cast<int>(mds[j].cpu * 100);
+            sat::LinearExpr mem_provisioned = md_nodes_used[j] * static_cast<int>(mds[j].memory * 100);
+            
+            // Calculate waste (provisioned - assigned)
+            // Note: md_cpu_assigned and md_mem_assigned are already scaled by 100
+            sat::LinearExpr cpu_waste = cpu_provisioned - md_cpu_assigned[j];
+            sat::LinearExpr mem_waste = mem_provisioned - md_mem_assigned[j];
+            
+            // Add normalized waste to total
+            // We normalize by dividing by capacity, but since we're in integer domain,
+            // we keep the scale factor
+            total_waste += cpu_waste + mem_waste;
+        }
+        
+        return total_waste;
+    }
+    
+    // Build combined objective with waste and plugin scores
+    sat::LinearExpr BuildCombinedObjective(const double* plugin_scores, 
+                                           const sat::LinearExpr& soft_penalty,
+                                           double waste_weight = 0.7) {
+        // Calculate waste objective
+        sat::LinearExpr waste_objective = CalculateWasteObjective();
+        
+        // Calculate plugin score objective
+        sat::LinearExpr plugin_objective;
+        for (int j = 0; j < num_mds; ++j) {
+            // Original logic: higher plugin score = lower cost
+            int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
+            for (int k = 0; k < slots_per_md[j]; ++k) {
+                plugin_objective += slot_used[j][k] * weight;
+            }
+        }
+        
+        // Treat waste and plugin scores equally
+        // Both get the same weight scaling for fair comparison
+        int objective_scale = 1000;
+        
+        sat::LinearExpr combined_objective;
+        combined_objective += waste_objective * objective_scale;  // Waste minimization
+        combined_objective += plugin_objective * objective_scale;  // Plugin scores
+        combined_objective += soft_penalty * 250;  // Soft affinity penalties
+        
+        return combined_objective;
+    }
 
 };
 
@@ -129,7 +203,8 @@ SolverResult OptimisePlacement(
     const int* initial_assignment,
     int* out_slot_assignments,
     uint8_t* out_slots_used,
-    const int* max_runtime_secs
+    const int* max_runtime_secs,
+    const double* improvement_threshold
 ) {
     SolverResult result;
     sat::CpModelBuilder model;
@@ -208,8 +283,15 @@ SolverResult OptimisePlacement(
             model.AddGreaterThan(assigned, 0).OnlyEnforceIf(slot_used[j][k]);
             model.AddEquality(assigned, 0).OnlyEnforceIf(slot_used[j][k].Not());
             used_sum += slot_used[j][k];
+            
+            // Track resource assignments for waste calculation
+            optimiser.TrackResourceAssignments(j, k, cpu_sum, mem_sum);
         }
         model.AddLessOrEqual(used_sum, mds[j].max_scale_out);
+        
+        // Set the number of nodes used for this MD
+        optimiser.SetNodesUsed(j, used_sum);
+        
         for (int k = 0; k + 1 < slots; ++k) {
             model.AddImplication(slot_used[j][k + 1], slot_used[j][k]);
         }
@@ -247,15 +329,49 @@ SolverResult OptimisePlacement(
         }
     }
 
-    sat::LinearExpr objective;
-    for (int j = 0; j < num_mds; ++j) {
-        int weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
-        int slots = slots_per_md[j];
-        for (int k = 0; k < slots; ++k) {
-            objective += slot_used[j][k] * weight;
+    // Build combined objective with waste calculation and plugin scores
+    sat::LinearExpr objective = optimiser.BuildCombinedObjective(plugin_scores, total_penalty, 0.7);
+    
+    // Calculate current state cost based on where pods are currently assigned
+    double current_state_cost = 0.0;
+    std::vector<bool> md_currently_used(num_mds, false);
+    
+    // Mark which MDs are currently being used
+    for (int i = 0; i < num_pods; ++i) {
+        int current_md = pods[i].current_md_assignment;
+        if (current_md >= 0 && current_md < num_mds) {
+            md_currently_used[current_md] = true;
         }
     }
-    objective += static_cast<int>(0.25 * 1000.0) * total_penalty;
+    
+    // Calculate current cost based on waste from current pod placements
+    for (int j = 0; j < num_mds; ++j) {
+        if (md_currently_used[j]) {
+            // Calculate current resource usage for this MD
+            double cpu_used = 0.0, mem_used = 0.0;
+            for (int i = 0; i < num_pods; ++i) {
+                if (pods[i].current_md_assignment == j) {
+                    cpu_used += pods[i].cpu * 100.0; // Scale to match optimizer
+                    mem_used += pods[i].memory * 100.0;
+                }
+            }
+            
+            // Calculate provisioned resources (assuming 1 node currently)
+            double cpu_provisioned = mds[j].cpu * 100.0;
+            double mem_provisioned = mds[j].memory * 100.0;
+            
+            // Calculate waste 
+            double cpu_waste = cpu_provisioned - cpu_used;
+            double mem_waste = mem_provisioned - mem_used;
+            
+            // Add plugin score component (same as optimized objective)
+            int plugin_weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
+            
+            // Use same scaling as BuildCombinedObjective: waste * 1000 + plugin (already scaled by 1000)
+            current_state_cost += (cpu_waste + mem_waste) * 1000.0 + plugin_weight;
+        }
+    }
+    result.current_state_cost = current_state_cost;
     model.Minimize(objective);
 
     sat::Model cp_model;
@@ -278,7 +394,18 @@ SolverResult OptimisePlacement(
 
     if (!result.success) {
         std::cerr << "No solution found.\n";
+        result.already_optimal = false; // Can't be optimal if no solution found
         return result;
+    }
+    
+    // Check if improvement meets threshold
+    result.already_optimal = false;
+    if (improvement_threshold != nullptr && current_state_cost > 0.0) {
+        double improvement_percentage = (current_state_cost - result.objective) / current_state_cost * 100.0;
+        if (improvement_percentage < *improvement_threshold) {
+            result.already_optimal = true;
+            // Still return the solution, but mark it as not meeting threshold
+        }
     }
 
     for (int i = 0; i < num_pods; ++i) {

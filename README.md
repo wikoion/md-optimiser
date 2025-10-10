@@ -53,9 +53,10 @@ allowed := []int{1}                   // pod 0 may run on MD 0
 initial := [][][]int{{{0, 0}}}        // optional warm start: pod 0 -> MD 0, slot 0
 maxRuntime := 10                      // optional runtime limit in seconds
 improvementThreshold := 5.0           // optional: min improvement % required
+scoreOnly := false                    // optional: true = only calculate score, no optimization
 
 result := optimiser.OptimisePlacementRaw(
-    mds, pods, scores, allowed, initial, &maxRuntime, &improvementThreshold,
+    mds, pods, scores, allowed, initial, &maxRuntime, &improvementThreshold, &scoreOnly,
 )
 if result.Succeeded {
     for i, assignment := range result.PodAssignments {
@@ -74,6 +75,23 @@ The optimiser now explicitly models individual slots within each machine deploym
 - Fine-grained control over pod placement within scaled-out deployments
 - Better resource utilization tracking per slot
 - Support for affinity rules at the slot level
+
+### Score-Only Mode
+The optimiser can evaluate the current deployment score without performing optimization:
+- Set `scoreOnly` to `true` to calculate the current state score only
+- Returns immediately without running the CP-SAT solver (very fast, O(n) complexity)
+- Use this for monitoring, alerting, or deciding whether to trigger optimization
+- Result includes the current state score in the `Objective` field
+- `PodAssignments` will be empty in score-only mode
+
+Example:
+```go
+scoreOnly := true
+result := optimiser.OptimisePlacementRaw(
+    mds, pods, scores, allowed, initial, nil, nil, &scoreOnly,
+)
+fmt.Printf("Current deployment score: %.2f\n", result.Objective)
+```
 
 ### Improvement Threshold
 The optimiser can evaluate whether a re-optimization is worthwhile based on a minimum improvement percentage:

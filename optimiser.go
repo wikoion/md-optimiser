@@ -58,7 +58,8 @@ SolverResult call_optimise_placement_with_handle(
     int* out_slot_assignments,
     uint8_t* out_slots_used,
     const int* max_runtime_secs,
-    const double* improvement_threshold
+    const double* improvement_threshold,
+    const _Bool* score_only
 ) {
     // Get the function pointer using dlsym with the specific handle
     void* sym = dlsym(lib_handle, "OptimisePlacement");
@@ -81,7 +82,8 @@ SolverResult call_optimise_placement_with_handle(
         int*,
         uint8_t*,
         const int*,
-        const double*
+        const double*,
+        const _Bool*
     );
 
     OptimisePlacementFunc func = (OptimisePlacementFunc)sym;
@@ -89,7 +91,7 @@ SolverResult call_optimise_placement_with_handle(
     // Call the function
     return func(mds, num_mds, pods, num_pods, plugin_scores,
                 allowed_matrix, initial_assignment, out_slot_assignments,
-                out_slots_used, max_runtime_secs, improvement_threshold);
+                out_slots_used, max_runtime_secs, improvement_threshold, score_only);
 }
 */
 import "C"
@@ -354,7 +356,35 @@ func parseResults(
 	slotsPerMD []int,
 	outSlotsUsedCount int,
 ) Result {
+	result := Result{
+		Succeeded:        bool(res.success),
+		Objective:        float64(res.objective),
+		SolverStatus:     int(res.status_code),
+		SolveTimeSecs:    float64(res.solve_time_secs),
+		Message:          "",
+		CurrentStateCost: float64(res.current_state_cost),
+		AlreadyOptimal:   bool(res.already_optimal),
+	}
+
+	// In score-only mode, assignments will be empty (-1 values)
+	// Check if this is score-only mode by looking at the first assignment
 	rawAssign := (*[1 << 30]C.int)(unsafe.Pointer(outAssign))[: numPods*2 : numPods*2]
+	isScoreOnly := numPods > 0 && rawAssign[0] == -1
+
+	if isScoreOnly {
+		// Score-only mode: return empty assignments
+		result.PodAssignments = []PodSlotAssignment{}
+		result.SlotsUsed = make([][]bool, len(slotsPerMD))
+		for j := range len(slotsPerMD) {
+			result.SlotsUsed[j] = make([]bool, slotsPerMD[j])
+		}
+		if result.Succeeded {
+			result.Message = "Score-only mode: current state score calculated"
+		}
+		return result
+	}
+
+	// Normal optimization mode: parse assignments
 	assignments := make([]PodSlotAssignment, numPods)
 	for i := range numPods {
 		assignments[i] = PodSlotAssignment{
@@ -374,17 +404,8 @@ func parseResults(
 		}
 	}
 
-	result := Result{
-		Succeeded:        bool(res.success),
-		Objective:        float64(res.objective),
-		SolverStatus:     int(res.status_code),
-		SolveTimeSecs:    float64(res.solve_time_secs),
-		PodAssignments:   assignments,
-		SlotsUsed:        slotsUsed,
-		Message:          "",
-		CurrentStateCost: float64(res.current_state_cost),
-		AlreadyOptimal:   bool(res.already_optimal),
-	}
+	result.PodAssignments = assignments
+	result.SlotsUsed = slotsUsed
 
 	if !result.Succeeded {
 		result.Message = fmt.Sprintf("Solver failed with status code %d", result.SolverStatus)
@@ -403,6 +424,7 @@ func OptimisePlacementRaw(
 	initialAssignment [][][]int,
 	maxRuntimeSeconds *int,
 	improvementThreshold *float64,
+	scoreOnly *bool,
 ) Result {
 	if err := extractAndLoadSharedLibrary(); err != nil {
 		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
@@ -440,12 +462,19 @@ func OptimisePlacementRaw(
 	outAssign, outSlots, outSlotsUsedCount, cleanupOutput := prepareOutputBuffers(numPods, slotsPerMD)
 	defer cleanupOutput()
 
+	var cScoreOnly *C.bool
+	if scoreOnly != nil && *scoreOnly {
+		cScoreOnly = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
+		*cScoreOnly = C.bool(true)
+		defer C.free(unsafe.Pointer(cScoreOnly))
+	}
+
 	res := C.call_optimise_placement_with_handle(
 		GetLibHandle(),
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
-		cImprovementThreshold,
+		cImprovementThreshold, cScoreOnly,
 	)
 
 	return parseResults(res, outAssign, outSlots, numPods, slotsPerMD, outSlotsUsedCount)

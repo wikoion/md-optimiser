@@ -324,9 +324,25 @@ func main() {
 	allowedMatrix, _ := computeAllowedMatrix(pods, mds)
 	initial := computeInitialAssignments(pods, mds, scores)
 
+	// First, get the current state score using score-only mode
+	fmt.Println("\n=== Score-Only Mode: Evaluating Current State ===")
+	scoreOnly := true
+	scoreStart := time.Now()
+	scoreResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, nil, nil, &scoreOnly)
+	scoreDuration := time.Since(scoreStart)
+
+	if scoreResult.Succeeded {
+		fmt.Printf("Current State Score: %.2f\n", scoreResult.Objective)
+		fmt.Printf("Evaluation Time: %s\n", scoreDuration)
+	} else {
+		fmt.Printf("Score-only mode failed: %s\n", scoreResult.Message)
+	}
+
+	// Now run the full optimization
+	fmt.Println("\n=== Optimization Mode: Finding Better Placement ===")
 	start := time.Now()
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, &runtime, nil)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, &runtime, nil, nil)
 	duration := time.Since(start)
 
 	fmt.Printf("\nResult: %s\nStatus Code: %d\nObjective: %.2f\nSolve Time: %.2fs\nDuration (Go): %s\n",

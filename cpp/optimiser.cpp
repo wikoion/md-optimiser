@@ -204,7 +204,8 @@ SolverResult OptimisePlacement(
     int* out_slot_assignments,
     uint8_t* out_slots_used,
     const int* max_runtime_secs,
-    const double* improvement_threshold
+    const double* improvement_threshold,
+    const bool* score_only
 ) {
     SolverResult result;
     sat::CpModelBuilder model;
@@ -372,6 +373,31 @@ SolverResult OptimisePlacement(
         }
     }
     result.current_state_cost = current_state_cost;
+
+    // Score-only mode: return current state cost without optimization
+    if (score_only != nullptr && *score_only) {
+        result.success = true;
+        result.objective = current_state_cost;
+        result.status_code = static_cast<int>(FEASIBLE);
+        result.solve_time_secs = 0.0;
+        result.already_optimal = false;
+
+        // Set all output arrays to zero/empty
+        for (int i = 0; i < num_pods; ++i) {
+            out_slot_assignments[i * 2] = -1;
+            out_slot_assignments[i * 2 + 1] = -1;
+        }
+
+        int offset = 0;
+        for (int j = 0; j < num_mds; ++j) {
+            for (int k = 0; k < slots_per_md[j]; ++k) {
+                out_slots_used[offset++] = 0;
+            }
+        }
+
+        return result;
+    }
+
     model.Minimize(objective);
 
     sat::Model cp_model;

@@ -39,6 +39,18 @@ func (p *mockPod) GetSoftAffinityPeers() []int       { return p.softAffinityPeer
 func (p *mockPod) GetSoftAffinityWeights() []float64 { return p.softAffinityValues }
 func (p *mockPod) GetCurrentMDAssignment() int       { return -1 } // Default: unknown assignment
 
+// mockPodWithAssignment extends mockPod with a current MD assignment
+type mockPodWithAssignment struct {
+	cpu, memory         float64
+	labels              map[string]string
+	currentMDAssignment int
+}
+
+func (p *mockPodWithAssignment) GetCPU() float64             { return p.cpu }
+func (p *mockPodWithAssignment) GetMemory() float64          { return p.memory }
+func (p *mockPodWithAssignment) GetLabel(key string) string  { return p.labels[key] }
+func (p *mockPodWithAssignment) GetCurrentMDAssignment() int { return p.currentMDAssignment }
+
 func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 	mds := []optimiser.MachineDeployment{}
 	scores := []float64{}
@@ -75,7 +87,7 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
 	if !result.Succeeded {
 		t.Fatalf("Expected success: %s", result.Message)
 	}
@@ -145,7 +157,7 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -171,7 +183,7 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -195,7 +207,7 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
 
 	if result.Succeeded {
 		t.Fatalf("Expected failure due to incompatibility, got success")
@@ -248,7 +260,7 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil)
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success with 3 pods, 3 slots, anti-affinity. Got failure: %s", result.Message)
@@ -279,4 +291,85 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 	for i, assignment := range result.PodAssignments {
 		t.Logf("  Pod %d → MD %d Slot %d", i, assignment.MD, assignment.Slot)
 	}
+}
+
+func TestOptimisePlacementRaw_ScoreOnlyMode(t *testing.T) {
+	// Create test MDs and pods with current assignments
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-a", cpu: 16, memory: 64, maxScaleOut: 2},
+		&mockMD{name: "md-b", cpu: 8, memory: 32, maxScaleOut: 2},
+		&mockMD{name: "md-c", cpu: 4, memory: 16, maxScaleOut: 3},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPodWithAssignment{cpu: 2, memory: 4, currentMDAssignment: 0},
+		&mockPodWithAssignment{cpu: 4, memory: 8, currentMDAssignment: 0},
+		&mockPodWithAssignment{cpu: 1, memory: 2, currentMDAssignment: 1},
+		&mockPodWithAssignment{cpu: 6, memory: 12, currentMDAssignment: 2},
+		&mockPodWithAssignment{cpu: 3, memory: 6, currentMDAssignment: 2},
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	allowed := make([]int, 0, numPods*numMDs)
+	for range pods {
+		for range mds {
+			allowed = append(allowed, 1)
+		}
+	}
+	scores := []float64{0.3, 0.5, 0.8}
+	initial := make([][][]int, 0)
+
+	runtime := 15
+	scoreOnly := true
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, &scoreOnly)
+
+	// Verify score-only mode behavior
+	if !result.Succeeded {
+		t.Fatalf("Expected success in score-only mode, got failure: %s", result.Message)
+	}
+
+	// Should return a score (current state cost)
+	if result.Objective <= 0 {
+		t.Errorf("Expected positive objective score, got: %.2f", result.Objective)
+	}
+
+	// CurrentStateCost should equal Objective in score-only mode
+	if result.CurrentStateCost != result.Objective {
+		t.Errorf("In score-only mode, CurrentStateCost (%.2f) should equal Objective (%.2f)",
+			result.CurrentStateCost, result.Objective)
+	}
+
+	// Should have empty assignments
+	if len(result.PodAssignments) != 0 {
+		t.Errorf("Expected empty PodAssignments in score-only mode, got %d assignments", len(result.PodAssignments))
+	}
+
+	// SlotsUsed should exist but be empty
+	if len(result.SlotsUsed) != len(mds) {
+		t.Errorf("Expected SlotsUsed array for %d MDs, got %d", len(mds), len(result.SlotsUsed))
+	}
+	for j, mdSlots := range result.SlotsUsed {
+		for k, used := range mdSlots {
+			if used {
+				t.Errorf("Expected all slots unused in score-only mode, but MD %d slot %d is used", j, k)
+			}
+		}
+	}
+
+	// Solve time should be near zero (no optimization ran)
+	if result.SolveTimeSecs > 0.1 {
+		t.Errorf("Expected near-zero solve time in score-only mode, got %.2fs", result.SolveTimeSecs)
+	}
+
+	// Message should indicate score-only mode
+	if matched, _ := regexp.MatchString("(?i)score.only", result.Message); !matched {
+		t.Errorf("Expected message to mention score-only mode, got: %s", result.Message)
+	}
+
+	t.Logf("Score-only mode test successful:")
+	t.Logf("  Current State Score: %.2f", result.Objective)
+	t.Logf("  Solve Time: %.4fs", result.SolveTimeSecs)
+	t.Logf("  Message: %s", result.Message)
 }

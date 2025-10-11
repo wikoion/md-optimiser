@@ -45,6 +45,11 @@ typedef struct {
     double solve_time_secs; // Time solver spent in seconds
     double current_state_cost; // Cost of current state before optimization
     _Bool already_optimal;     // True if improvement doesn't meet threshold
+    _Bool used_greedy;         // True if greedy was used (hint or fallback)
+    _Bool greedy_fallback;     // True if pure greedy fallback was used
+    int cpsat_attempts;        // Number of CP-SAT attempts made
+    int best_attempt;          // Which attempt produced the result
+    int unplaced_pods;         // Number of pods that couldn't be placed
 } SolverResult;
 
 // C wrapper function that dynamically calls OptimisePlacement
@@ -59,7 +64,12 @@ SolverResult call_optimise_placement_with_handle(
     uint8_t* out_slots_used,
     const int* max_runtime_secs,
     const double* improvement_threshold,
-    const _Bool* score_only
+    const _Bool* score_only,
+    const int* max_attempts,
+    const _Bool* use_greedy_hint,
+    const int* greedy_hint_attempt,
+    const _Bool* fallback_to_greedy,
+    const _Bool* greedy_only
 ) {
     // Get the function pointer using dlsym with the specific handle
     void* sym = dlsym(lib_handle, "OptimisePlacement");
@@ -67,7 +77,7 @@ SolverResult call_optimise_placement_with_handle(
         // Try with underscore prefix (macOS)
         sym = dlsym(lib_handle, "_OptimisePlacement");
         if (!sym) {
-            SolverResult err_result = {0, 0.0, -1, 0.0, 0.0, 0};
+            SolverResult err_result = {0, 0.0, -1, 0.0, 0.0, 0, 0, 0, 0, 0, 0};
             return err_result;
         }
     }
@@ -83,6 +93,11 @@ SolverResult call_optimise_placement_with_handle(
         uint8_t*,
         const int*,
         const double*,
+        const _Bool*,
+        const int*,
+        const _Bool*,
+        const int*,
+        const _Bool*,
         const _Bool*
     );
 
@@ -91,7 +106,9 @@ SolverResult call_optimise_placement_with_handle(
     // Call the function
     return func(mds, num_mds, pods, num_pods, plugin_scores,
                 allowed_matrix, initial_assignment, out_slot_assignments,
-                out_slots_used, max_runtime_secs, improvement_threshold, score_only);
+                out_slots_used, max_runtime_secs, improvement_threshold, score_only,
+                max_attempts, use_greedy_hint, greedy_hint_attempt,
+                fallback_to_greedy, greedy_only);
 }
 */
 import "C"
@@ -133,6 +150,23 @@ type PodSlotAssignment struct {
 	Slot int
 }
 
+// OptimizationConfig holds configuration options for the optimization process
+type OptimizationConfig struct {
+	// Basic optimization controls
+	MaxRuntimeSeconds    *int     // Timeout per CP-SAT attempt (default: 15s)
+	ImprovementThreshold *float64 // Minimum improvement % to accept (default: 0.0 = any improvement)
+	ScoreOnly            *bool    // Just calculate score, no optimization (default: false)
+
+	// Retry controls
+	MaxAttempts *int // Number of CP-SAT attempts (default: 1)
+
+	// Greedy heuristic controls
+	UseGreedyHint      *bool // Use greedy as hint for CP-SAT attempt N (default: false)
+	GreedyHintAttempt  *int  // Which attempt to inject greedy hint (default: 2)
+	FallbackToGreedy   *bool // Use pure greedy if all CP-SAT attempts fail (default: false)
+	GreedyOnly         *bool // Skip CP-SAT entirely, only run greedy (default: false)
+}
+
 type Result struct {
 	PodAssignments   []PodSlotAssignment
 	SlotsUsed        [][]bool
@@ -143,6 +177,11 @@ type Result struct {
 	Message          string
 	CurrentStateCost float64 // Cost of the current state before optimization
 	AlreadyOptimal   bool    // True if improvement doesn't meet threshold
+	UsedGreedy       bool    // True if greedy algorithm was used (hint or fallback)
+	GreedyFallback   bool    // True if pure greedy fallback was used (not just hint)
+	CPSATAttempts    int     // Number of CP-SAT attempts made
+	BestAttempt      int     // Which attempt produced the result (0 = greedy-only)
+	UnplacedPods     int     // Number of pods that couldn't be placed (greedy only)
 }
 
 func makeCIntSlice(data []int) *C.int {
@@ -364,6 +403,11 @@ func parseResults(
 		Message:          "",
 		CurrentStateCost: float64(res.current_state_cost),
 		AlreadyOptimal:   bool(res.already_optimal),
+		UsedGreedy:       bool(res.used_greedy),
+		GreedyFallback:   bool(res.greedy_fallback),
+		CPSATAttempts:    int(res.cpsat_attempts),
+		BestAttempt:      int(res.best_attempt),
+		UnplacedPods:     int(res.unplaced_pods),
 	}
 
 	// In score-only mode, assignments will be empty (-1 values)
@@ -422,12 +466,31 @@ func OptimisePlacementRaw(
 	pluginScores []float64,
 	allowedMatrix []int,
 	initialAssignment [][][]int,
-	maxRuntimeSeconds *int,
-	improvementThreshold *float64,
-	scoreOnly *bool,
+	config *OptimizationConfig,
 ) Result {
 	if err := extractAndLoadSharedLibrary(); err != nil {
 		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
+	}
+
+	// Extract individual config parameters (nil config is allowed)
+	var maxRuntimeSeconds *int
+	var improvementThreshold *float64
+	var scoreOnly *bool
+	var maxAttempts *int
+	var useGreedyHint *bool
+	var greedyHintAttempt *int
+	var fallbackToGreedy *bool
+	var greedyOnly *bool
+
+	if config != nil {
+		maxRuntimeSeconds = config.MaxRuntimeSeconds
+		improvementThreshold = config.ImprovementThreshold
+		scoreOnly = config.ScoreOnly
+		maxAttempts = config.MaxAttempts
+		useGreedyHint = config.UseGreedyHint
+		greedyHintAttempt = config.GreedyHintAttempt
+		fallbackToGreedy = config.FallbackToGreedy
+		greedyOnly = config.GreedyOnly
 	}
 
 	numMDs := len(mds)
@@ -462,11 +525,47 @@ func OptimisePlacementRaw(
 	outAssign, outSlots, outSlotsUsedCount, cleanupOutput := prepareOutputBuffers(numPods, slotsPerMD)
 	defer cleanupOutput()
 
+	// Prepare optional boolean parameters
 	var cScoreOnly *C.bool
 	if scoreOnly != nil && *scoreOnly {
 		cScoreOnly = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
 		*cScoreOnly = C.bool(true)
 		defer C.free(unsafe.Pointer(cScoreOnly))
+	}
+
+	var cMaxAttempts *C.int
+	if maxAttempts != nil {
+		cMaxAttempts = (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
+		*cMaxAttempts = C.int(*maxAttempts)
+		defer C.free(unsafe.Pointer(cMaxAttempts))
+	}
+
+	var cUseGreedyHint *C.bool
+	if useGreedyHint != nil {
+		cUseGreedyHint = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
+		*cUseGreedyHint = C.bool(*useGreedyHint)
+		defer C.free(unsafe.Pointer(cUseGreedyHint))
+	}
+
+	var cGreedyHintAttempt *C.int
+	if greedyHintAttempt != nil {
+		cGreedyHintAttempt = (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
+		*cGreedyHintAttempt = C.int(*greedyHintAttempt)
+		defer C.free(unsafe.Pointer(cGreedyHintAttempt))
+	}
+
+	var cFallbackToGreedy *C.bool
+	if fallbackToGreedy != nil {
+		cFallbackToGreedy = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
+		*cFallbackToGreedy = C.bool(*fallbackToGreedy)
+		defer C.free(unsafe.Pointer(cFallbackToGreedy))
+	}
+
+	var cGreedyOnly *C.bool
+	if greedyOnly != nil {
+		cGreedyOnly = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
+		*cGreedyOnly = C.bool(*greedyOnly)
+		defer C.free(unsafe.Pointer(cGreedyOnly))
 	}
 
 	res := C.call_optimise_placement_with_handle(
@@ -475,7 +574,42 @@ func OptimisePlacementRaw(
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
 		cImprovementThreshold, cScoreOnly,
+		cMaxAttempts, cUseGreedyHint, cGreedyHintAttempt,
+		cFallbackToGreedy, cGreedyOnly,
 	)
 
 	return parseResults(res, outAssign, outSlots, numPods, slotsPerMD, outSlotsUsedCount)
+}
+
+// Helper functions for creating pointers to config values
+func IntPtr(i int) *int {
+	return &i
+}
+
+func BoolPtr(b bool) *bool {
+	return &b
+}
+
+func FloatPtr(f float64) *float64 {
+	return &f
+}
+
+// OptimisePlacement provides backward compatibility with the old API
+// Deprecated: Use OptimisePlacementRaw with OptimizationConfig instead
+func OptimisePlacement(
+	mds []MachineDeployment,
+	pods []Pod,
+	pluginScores []float64,
+	allowedMatrix []int,
+	initialAssignment [][][]int,
+	maxRuntimeSeconds *int,
+	improvementThreshold *float64,
+	scoreOnly *bool,
+) Result {
+	config := &OptimizationConfig{
+		MaxRuntimeSeconds:    maxRuntimeSeconds,
+		ImprovementThreshold: improvementThreshold,
+		ScoreOnly:            scoreOnly,
+	}
+	return OptimisePlacementRaw(mds, pods, pluginScores, allowedMatrix, initialAssignment, config)
 }

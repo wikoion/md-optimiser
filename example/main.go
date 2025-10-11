@@ -326,9 +326,11 @@ func main() {
 
 	// First, get the current state score using score-only mode
 	fmt.Println("\n=== Score-Only Mode: Evaluating Current State ===")
-	scoreOnly := true
 	scoreStart := time.Now()
-	scoreResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, nil, nil, &scoreOnly)
+	scoreConfig := &optimiser.OptimizationConfig{
+		ScoreOnly: optimiser.BoolPtr(true),
+	}
+	scoreResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, scoreConfig)
 	scoreDuration := time.Since(scoreStart)
 
 	if scoreResult.Succeeded {
@@ -338,20 +340,144 @@ func main() {
 		fmt.Printf("Score-only mode failed: %s\n", scoreResult.Message)
 	}
 
-	// Now run the full optimization
-	fmt.Println("\n=== Optimization Mode: Finding Better Placement ===")
-	start := time.Now()
-	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, initial, &runtime, nil, nil)
-	duration := time.Since(start)
+	// Compare three optimization strategies
+	fmt.Println("\n" + strings.Repeat("=", 80))
+	fmt.Println("=== COMPARISON: Greedy vs CP-SAT vs Greedy Warm-Start ===")
+	fmt.Println(strings.Repeat("=", 80))
 
-	fmt.Printf("\nResult: %s\nStatus Code: %d\nObjective: %.2f\nSolve Time: %.2fs\nDuration (Go): %s\n",
-		result.Message, result.SolverStatus, result.Objective, result.SolveTimeSecs, duration)
+	// Strategy 1: Greedy-Only (Fast Heuristic)
+	fmt.Println("\n[1] Greedy-Only Mode (Fast Heuristic)")
+	fmt.Println(strings.Repeat("-", 80))
+	greedyStart := time.Now()
+	greedyConfig := &optimiser.OptimizationConfig{
+		GreedyOnly: optimiser.BoolPtr(true),
+	}
+	greedyResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, greedyConfig)
+	greedyDuration := time.Since(greedyStart)
 
-	if !result.Succeeded {
-		fmt.Println("\nNo solution found by optimiser.")
+	if greedyResult.Succeeded {
+		fmt.Printf("✓ Success\n")
+		fmt.Printf("  Objective:      %.2f\n", greedyResult.Objective)
+		fmt.Printf("  Time:           %s\n", greedyDuration)
+		fmt.Printf("  Used Greedy:    %v\n", greedyResult.UsedGreedy)
+		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
+	} else {
+		fmt.Printf("✗ Failed: %s\n", greedyResult.Message)
+		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
+	}
+
+	// Strategy 2: CP-SAT Only (Optimal but Slower)
+	fmt.Println("\n[2] CP-SAT Only Mode (Optimal Search)")
+	fmt.Println(strings.Repeat("-", 80))
+	cpsatStart := time.Now()
+	cpsatConfig := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: optimiser.IntPtr(30),
+		MaxAttempts:       optimiser.IntPtr(1),
+	}
+	cpsatResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, cpsatConfig)
+	cpsatDuration := time.Since(cpsatStart)
+
+	if cpsatResult.Succeeded {
+		fmt.Printf("✓ Success\n")
+		fmt.Printf("  Objective:      %.2f\n", cpsatResult.Objective)
+		fmt.Printf("  Time:           %s\n", cpsatDuration)
+		fmt.Printf("  Solve Time:     %.2fs\n", cpsatResult.SolveTimeSecs)
+		fmt.Printf("  Status Code:    %d\n", cpsatResult.SolverStatus)
+		fmt.Printf("  CP-SAT Attempts: %d\n", cpsatResult.CPSATAttempts)
+	} else {
+		fmt.Printf("✗ Failed: %s\n", cpsatResult.Message)
+	}
+
+	// Strategy 3: Greedy Warm-Start (Best of Both)
+	fmt.Println("\n[3] CP-SAT with Greedy Warm-Start (Hybrid)")
+	fmt.Println(strings.Repeat("-", 80))
+	hybridStart := time.Now()
+	hybridConfig := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: optimiser.IntPtr(30),
+		MaxAttempts:       optimiser.IntPtr(3),
+		UseGreedyHint:     optimiser.BoolPtr(true),
+		GreedyHintAttempt: optimiser.IntPtr(2),
+		FallbackToGreedy:  optimiser.BoolPtr(true),
+	}
+	hybridResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, hybridConfig)
+	hybridDuration := time.Since(hybridStart)
+
+	if hybridResult.Succeeded {
+		fmt.Printf("✓ Success\n")
+		fmt.Printf("  Objective:      %.2f\n", hybridResult.Objective)
+		fmt.Printf("  Time:           %s\n", hybridDuration)
+		fmt.Printf("  Solve Time:     %.2fs\n", hybridResult.SolveTimeSecs)
+		fmt.Printf("  Used Greedy:    %v\n", hybridResult.UsedGreedy)
+		fmt.Printf("  Greedy Fallback: %v\n", hybridResult.GreedyFallback)
+		fmt.Printf("  CP-SAT Attempts: %d\n", hybridResult.CPSATAttempts)
+		fmt.Printf("  Best Attempt:   %d\n", hybridResult.BestAttempt)
+	} else {
+		fmt.Printf("✗ Failed: %s\n", hybridResult.Message)
+	}
+
+	// Summary comparison
+	fmt.Println("\n" + strings.Repeat("=", 80))
+	fmt.Println("=== SUMMARY ===")
+	fmt.Println(strings.Repeat("=", 80))
+	fmt.Println("\nStrategy Comparison:")
+	fmt.Printf("%-25s | %-12s | %-15s | %-10s\n", "Strategy", "Objective", "Time", "Success")
+	fmt.Println(strings.Repeat("-", 80))
+
+	if greedyResult.Succeeded {
+		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
+			"Greedy-Only", greedyResult.Objective, greedyDuration, "✓")
+	} else {
+		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
+			"Greedy-Only", "N/A", greedyDuration, "✗")
+	}
+
+	if cpsatResult.Succeeded {
+		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
+			"CP-SAT Only", cpsatResult.Objective, cpsatDuration, "✓")
+	} else {
+		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
+			"CP-SAT Only", "N/A", cpsatDuration, "✗")
+	}
+
+	if hybridResult.Succeeded {
+		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
+			"Hybrid (Greedy + CP-SAT)", hybridResult.Objective, hybridDuration, "✓")
+	} else {
+		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
+			"Hybrid (Greedy + CP-SAT)", "N/A", hybridDuration, "✗")
+	}
+
+	// Determine which strategy to use for detailed output
+	var result optimiser.Result
+	var strategyName string
+
+	// Prefer the best objective value among successful strategies
+	bestObjective := float64(1e100)
+	if greedyResult.Succeeded && greedyResult.Objective < bestObjective {
+		result = greedyResult
+		strategyName = "Greedy-Only"
+		bestObjective = greedyResult.Objective
+	}
+	if cpsatResult.Succeeded && cpsatResult.Objective < bestObjective {
+		result = cpsatResult
+		strategyName = "CP-SAT Only"
+		bestObjective = cpsatResult.Objective
+	}
+	if hybridResult.Succeeded && hybridResult.Objective < bestObjective {
+		result = hybridResult
+		strategyName = "Hybrid"
+		bestObjective = hybridResult.Objective
+	}
+
+	if bestObjective == float64(1e100) {
+		fmt.Println("\n✗ No strategy produced a valid solution.")
 		return
 	}
+
+	fmt.Printf("\n✓ Best strategy: %s (Objective: %.2f)\n", strategyName, bestObjective)
+	fmt.Println("\n" + strings.Repeat("=", 80))
+	fmt.Printf("=== DETAILED RESULTS: %s ===\n", strategyName)
+	fmt.Println(strings.Repeat("=", 80))
 
 	totalNodes := 0
 	for _, slots := range result.SlotsUsed {

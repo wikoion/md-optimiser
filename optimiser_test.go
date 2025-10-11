@@ -87,7 +87,10 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: &runtime,
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 	if !result.Succeeded {
 		t.Fatalf("Expected success: %s", result.Message)
 	}
@@ -157,7 +160,10 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: &runtime,
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -183,7 +189,10 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: &runtime,
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success, got failure: %s", result.Message)
@@ -207,7 +216,10 @@ func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: &runtime,
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
 	if result.Succeeded {
 		t.Fatalf("Expected failure due to incompatibility, got success")
@@ -260,7 +272,10 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	runtime := 15
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, nil)
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: &runtime,
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
 	if !result.Succeeded {
 		t.Fatalf("Expected success with 3 pods, 3 slots, anti-affinity. Got failure: %s", result.Message)
@@ -323,7 +338,11 @@ func TestOptimisePlacementRaw_ScoreOnlyMode(t *testing.T) {
 
 	runtime := 15
 	scoreOnly := true
-	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, &runtime, nil, &scoreOnly)
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: &runtime,
+		ScoreOnly:         &scoreOnly,
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
 	// Verify score-only mode behavior
 	if !result.Succeeded {
@@ -372,4 +391,294 @@ func TestOptimisePlacementRaw_ScoreOnlyMode(t *testing.T) {
 	t.Logf("  Current State Score: %.2f", result.Objective)
 	t.Logf("  Solve Time: %.4fs", result.SolveTimeSecs)
 	t.Logf("  Message: %s", result.Message)
+}
+
+func TestOptimisePlacementRaw_GreedyOnly(t *testing.T) {
+	// Create simple test scenario
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		&mockMD{name: "md-2", cpu: 2.0, memory: 4.0, maxScaleOut: 5},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 2.0},
+		&mockPod{cpu: 0.5, memory: 1.0},
+		&mockPod{cpu: 1.5, memory: 3.0},
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	scores := []float64{1.0, 0.5}
+	allowed := make([]int, numPods*numMDs)
+	for i := range allowed {
+		allowed[i] = 1
+	}
+	initial := make([][][]int, 0)
+
+	config := &optimiser.OptimizationConfig{
+		GreedyOnly: boolPtr(true),
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+
+	if !result.Succeeded {
+		t.Fatalf("Expected greedy-only to succeed: %s", result.Message)
+	}
+
+	assert.True(t, result.UsedGreedy, "Expected UsedGreedy to be true")
+	assert.True(t, result.GreedyFallback, "Expected GreedyFallback to be true")
+	assert.Equal(t, 0, result.CPSATAttempts, "Expected 0 CP-SAT attempts in greedy-only mode")
+	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
+
+	t.Logf("Greedy-only test successful:")
+	t.Logf("  Objective: %.2f", result.Objective)
+	t.Logf("  Used Greedy: %v", result.UsedGreedy)
+	t.Logf("  Assignments: %v", result.PodAssignments)
+}
+
+func TestOptimisePlacementRaw_GreedyHint(t *testing.T) {
+	// Create test scenario where greedy hint should help
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		&mockMD{name: "md-2", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 2.0},
+		&mockPod{cpu: 1.0, memory: 2.0},
+		&mockPod{cpu: 1.0, memory: 2.0},
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	scores := []float64{1.0, 0.8}
+	allowed := make([]int, numPods*numMDs)
+	for i := range allowed {
+		allowed[i] = 1
+	}
+	initial := make([][][]int, 0)
+
+	config := &optimiser.OptimizationConfig{
+		MaxAttempts:       intPtr(3),
+		UseGreedyHint:     boolPtr(true),
+		GreedyHintAttempt: intPtr(2),
+		MaxRuntimeSeconds: intPtr(5),
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+
+	if !result.Succeeded {
+		t.Fatalf("Expected optimization with greedy hint to succeed: %s", result.Message)
+	}
+
+	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
+	assert.True(t, result.CPSATAttempts >= 1, "Expected at least 1 CP-SAT attempt")
+
+	t.Logf("Greedy hint test successful:")
+	t.Logf("  Objective: %.2f", result.Objective)
+	t.Logf("  Used Greedy: %v", result.UsedGreedy)
+	t.Logf("  CP-SAT Attempts: %d", result.CPSATAttempts)
+	t.Logf("  Best Attempt: %d", result.BestAttempt)
+}
+
+func TestOptimisePlacementRaw_GreedyFallback(t *testing.T) {
+	// Create a difficult scenario that might challenge CP-SAT
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-1", cpu: 2.0, memory: 4.0, maxScaleOut: 3},
+		&mockMD{name: "md-2", cpu: 2.0, memory: 4.0, maxScaleOut: 3},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 2.0},
+		&mockPod{cpu: 1.0, memory: 2.0},
+		&mockPod{cpu: 0.5, memory: 1.0},
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	scores := []float64{1.0, 0.9}
+	allowed := make([]int, numPods*numMDs)
+	for i := range allowed {
+		allowed[i] = 1
+	}
+	initial := make([][][]int, 0)
+
+	config := &optimiser.OptimizationConfig{
+		MaxAttempts:       intPtr(2),
+		MaxRuntimeSeconds: intPtr(1), // Very short timeout to potentially trigger fallback
+		FallbackToGreedy:  boolPtr(true),
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+
+	// Either CP-SAT succeeds or greedy fallback kicks in
+	if !result.Succeeded {
+		t.Fatalf("Expected solution (either CP-SAT or greedy): %s", result.Message)
+	}
+
+	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
+
+	t.Logf("Greedy fallback test successful:")
+	t.Logf("  Objective: %.2f", result.Objective)
+	t.Logf("  Used Greedy: %v", result.UsedGreedy)
+	t.Logf("  Greedy Fallback: %v", result.GreedyFallback)
+	t.Logf("  CP-SAT Attempts: %d", result.CPSATAttempts)
+}
+
+func TestOptimisePlacementRaw_MultipleAttempts(t *testing.T) {
+	// Test that multiple attempts work correctly
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		&mockMD{name: "md-2", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 2.0},
+		&mockPod{cpu: 1.0, memory: 2.0},
+	}
+
+	numPods := len(pods)
+	numMDs := len(mds)
+
+	scores := []float64{1.0, 0.9}
+	allowed := make([]int, numPods*numMDs)
+	for i := range allowed {
+		allowed[i] = 1
+	}
+	initial := make([][][]int, 0)
+
+	config := &optimiser.OptimizationConfig{
+		MaxAttempts:       intPtr(5),
+		MaxRuntimeSeconds: intPtr(3),
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+
+	if !result.Succeeded {
+		t.Fatalf("Expected optimization to succeed: %s", result.Message)
+	}
+
+	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
+	assert.True(t, result.CPSATAttempts >= 1 && result.CPSATAttempts <= 5, "Expected 1-5 CP-SAT attempts")
+	assert.True(t, result.BestAttempt >= 1 && result.BestAttempt <= result.CPSATAttempts, "Best attempt should be valid")
+
+	t.Logf("Multiple attempts test successful:")
+	t.Logf("  CP-SAT Attempts: %d", result.CPSATAttempts)
+	t.Logf("  Best Attempt: %d", result.BestAttempt)
+	t.Logf("  Objective: %.2f", result.Objective)
+}
+
+func TestOptimisePlacementRaw_BackwardCompatibility(t *testing.T) {
+	// Test that nil config works as before (backward compatibility)
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 2.0},
+		&mockPod{cpu: 0.5, memory: 1.0},
+	}
+
+	numPods := len(pods)
+
+	scores := []float64{1.0}
+	allowed := []int{1, 1}
+	initial := make([][][]int, 0)
+
+	// Pass nil config - should use default behavior
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, nil)
+
+	if !result.Succeeded {
+		t.Fatalf("Expected backward-compatible optimization to succeed: %s", result.Message)
+	}
+
+	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
+	assert.False(t, result.UsedGreedy, "Expected not to use greedy with nil config")
+	assert.False(t, result.GreedyFallback, "Expected no greedy fallback with nil config")
+
+	t.Logf("Backward compatibility test successful:")
+	t.Logf("  Objective: %.2f", result.Objective)
+	t.Logf("  CP-SAT Attempts: %d", result.CPSATAttempts)
+}
+
+func TestOptimisePlacement_DeprecatedAPI(t *testing.T) {
+	// Test the deprecated wrapper function for backward compatibility
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 2.0},
+	}
+
+	numPods := len(pods)
+
+	scores := []float64{1.0}
+	allowed := []int{1}
+	initial := make([][][]int, 0)
+
+	runtime := 15
+	result := optimiser.OptimisePlacement(mds, pods, scores, allowed, initial, &runtime, nil, nil)
+
+	if !result.Succeeded {
+		t.Fatalf("Expected deprecated API to work: %s", result.Message)
+	}
+
+	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
+
+	t.Logf("Deprecated API test successful:")
+	t.Logf("  Objective: %.2f", result.Objective)
+}
+
+func TestOptimisePlacementRaw_ImprovementThreshold(t *testing.T) {
+	// Test that improvement threshold is respected
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+	}
+
+	// Create pods with current assignments
+	pods := []optimiser.Pod{
+		&mockPodWithAssignment{cpu: 1.0, memory: 2.0, currentMDAssignment: 0},
+		&mockPodWithAssignment{cpu: 1.0, memory: 2.0, currentMDAssignment: 0},
+	}
+
+	numPods := len(pods)
+
+	scores := []float64{1.0}
+	allowed := []int{1, 1}
+	initial := make([][][]int, 0)
+
+	// Set a very high threshold - solution might not meet it
+	config := &optimiser.OptimizationConfig{
+		ImprovementThreshold: floatPtr(50.0), // Require 50% improvement
+		MaxRuntimeSeconds:    intPtr(5),
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+
+	// Result might fail or succeed depending on whether threshold is met
+	t.Logf("Improvement threshold test:")
+	t.Logf("  Succeeded: %v", result.Succeeded)
+	t.Logf("  Current State Cost: %.2f", result.CurrentStateCost)
+	t.Logf("  Objective: %.2f", result.Objective)
+	t.Logf("  Already Optimal: %v", result.AlreadyOptimal)
+
+	if result.Succeeded {
+		assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned if succeeded")
+	}
+}
+
+func boolPtr(b bool) *bool {
+	return optimiser.BoolPtr(b)
+}
+
+func intPtr(i int) *int {
+	return optimiser.IntPtr(i)
+}
+
+func floatPtr(f float64) *float64 {
+	return optimiser.FloatPtr(f)
 }

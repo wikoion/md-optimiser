@@ -261,6 +261,60 @@ func computeAllowedMatrix(pods []optimiser.Pod, mds []optimiser.MachineDeploymen
 
 // computeInitialAssignments generates a greedy seed assignment based on plugin scores.
 // Used to warm-start the SAT solver and speed up convergence.
+// calculateWaste calculates CPU and memory waste for a given result
+func calculateWaste(result optimiser.Result, mds []optimiser.MachineDeployment, pods []optimiser.Pod) (float64, float64, int) {
+	if !result.Succeeded {
+		return 0, 0, 0
+	}
+
+	// Calculate total provisioned and used resources per MD
+	type MDResources struct {
+		provisionedCPU float64
+		provisionedMem float64
+		usedCPU        float64
+		usedMem        float64
+	}
+
+	mdResources := make(map[int]*MDResources)
+	totalNodes := 0
+
+	// Count nodes and provisioned resources
+	for mdIdx, slotsUsed := range result.SlotsUsed {
+		nodesUsed := 0
+		for _, used := range slotsUsed {
+			if used {
+				nodesUsed++
+			}
+		}
+		if nodesUsed > 0 {
+			totalNodes += nodesUsed
+			mdResources[mdIdx] = &MDResources{
+				provisionedCPU: float64(nodesUsed) * mds[mdIdx].GetCPU(),
+				provisionedMem: float64(nodesUsed) * mds[mdIdx].GetMemory(),
+			}
+		}
+	}
+
+	// Calculate used resources
+	for podIdx, assignment := range result.PodAssignments {
+		if assignment.MD >= 0 {
+			if res, ok := mdResources[assignment.MD]; ok {
+				res.usedCPU += pods[podIdx].GetCPU()
+				res.usedMem += pods[podIdx].GetMemory()
+			}
+		}
+	}
+
+	// Calculate total waste
+	var totalWasteCPU, totalWasteMem float64
+	for _, res := range mdResources {
+		totalWasteCPU += res.provisionedCPU - res.usedCPU
+		totalWasteMem += res.provisionedMem - res.usedMem
+	}
+
+	return totalWasteCPU, totalWasteMem, totalNodes
+}
+
 func computeInitialAssignments(
 	pods []optimiser.Pod,
 	mds []optimiser.MachineDeployment,
@@ -356,11 +410,16 @@ func main() {
 	greedyDuration := time.Since(greedyStart)
 
 	if greedyResult.Succeeded {
+		// Calculate waste for greedy result
+		greedyWasteCPU, greedyWasteMem, greedyNodes := calculateWaste(greedyResult, mds, pods)
+
 		fmt.Printf("✓ Success\n")
 		fmt.Printf("  Objective:      %.2f\n", greedyResult.Objective)
 		fmt.Printf("  Time:           %s\n", greedyDuration)
 		fmt.Printf("  Used Greedy:    %v\n", greedyResult.UsedGreedy)
 		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
+		fmt.Printf("  Nodes Used:     %d\n", greedyNodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", greedyWasteCPU, greedyWasteMem)
 	} else {
 		fmt.Printf("✗ Failed: %s\n", greedyResult.Message)
 		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
@@ -378,12 +437,17 @@ func main() {
 	cpsatDuration := time.Since(cpsatStart)
 
 	if cpsatResult.Succeeded {
+		// Calculate waste for CP-SAT result
+		cpsatWasteCPU, cpsatWasteMem, cpsatNodes := calculateWaste(cpsatResult, mds, pods)
+
 		fmt.Printf("✓ Success\n")
 		fmt.Printf("  Objective:      %.2f\n", cpsatResult.Objective)
 		fmt.Printf("  Time:           %s\n", cpsatDuration)
 		fmt.Printf("  Solve Time:     %.2fs\n", cpsatResult.SolveTimeSecs)
 		fmt.Printf("  Status Code:    %d\n", cpsatResult.SolverStatus)
 		fmt.Printf("  CP-SAT Attempts: %d\n", cpsatResult.CPSATAttempts)
+		fmt.Printf("  Nodes Used:     %d\n", cpsatNodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", cpsatWasteCPU, cpsatWasteMem)
 	} else {
 		fmt.Printf("✗ Failed: %s\n", cpsatResult.Message)
 	}
@@ -403,6 +467,9 @@ func main() {
 	hybridDuration := time.Since(hybridStart)
 
 	if hybridResult.Succeeded {
+		// Calculate waste for hybrid result
+		hybridWasteCPU, hybridWasteMem, hybridNodes := calculateWaste(hybridResult, mds, pods)
+
 		fmt.Printf("✓ Success\n")
 		fmt.Printf("  Objective:      %.2f\n", hybridResult.Objective)
 		fmt.Printf("  Time:           %s\n", hybridDuration)
@@ -411,6 +478,8 @@ func main() {
 		fmt.Printf("  Greedy Fallback: %v\n", hybridResult.GreedyFallback)
 		fmt.Printf("  CP-SAT Attempts: %d\n", hybridResult.CPSATAttempts)
 		fmt.Printf("  Best Attempt:   %d\n", hybridResult.BestAttempt)
+		fmt.Printf("  Nodes Used:     %d\n", hybridNodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", hybridWasteCPU, hybridWasteMem)
 	} else {
 		fmt.Printf("✗ Failed: %s\n", hybridResult.Message)
 	}

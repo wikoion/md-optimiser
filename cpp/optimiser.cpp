@@ -524,6 +524,98 @@ struct GreedyResult {
     int unplaced_count;
 };
 
+// Helper: Calculate optimal MD selection based on resource requirements
+vector<int> CalculateOptimalMDOrder(
+    const MachineDeployment* mds,
+    int num_mds,
+    const Pod* pods,
+    int num_pods,
+    const double* plugin_scores,
+    const int* allowed_matrix
+) {
+    // Calculate total resource requirements
+    double total_cpu = 0.0;
+    double total_mem = 0.0;
+    for (int i = 0; i < num_pods; ++i) {
+        total_cpu += pods[i].cpu;
+        total_mem += pods[i].memory;
+    }
+
+    // Estimate minimum nodes needed (rough heuristic)
+    int estimated_nodes = std::max(
+        static_cast<int>(std::ceil(total_cpu / 16.0)),  // Assume avg MD has ~16 CPU
+        static_cast<int>(std::ceil(total_mem / 32.0))   // Assume avg MD has ~32 GB
+    );
+    estimated_nodes = std::max(3, estimated_nodes);  // At least 3 for anti-affinity
+
+    // Calculate target resources per node
+    double target_cpu_per_node = total_cpu / estimated_nodes;
+    double target_mem_per_node = total_mem / estimated_nodes;
+
+    // Score each MD based on:
+    // 1. How well it matches target resources (minimize waste)
+    // 2. Plugin score (prefer higher scoring MDs)
+    // 3. Availability (can it fit the workload)
+    struct MDFitScore {
+        int md_idx;
+        double score;
+    };
+
+    vector<MDFitScore> md_scores;
+    for (int j = 0; j < num_mds; ++j) {
+        const MachineDeployment& md = mds[j];
+
+        // Check if any pods can be placed on this MD
+        bool can_place_any = false;
+        for (int i = 0; i < num_pods; ++i) {
+            if (allowed_matrix[i * num_mds + j] &&
+                pods[i].cpu <= md.cpu &&
+                pods[i].memory <= md.memory) {
+                can_place_any = true;
+                break;
+            }
+        }
+
+        if (!can_place_any) {
+            continue;  // Skip MDs that can't host any pods
+        }
+
+        // Calculate fitness score
+        // Lower waste = better fit to target
+        double cpu_waste_ratio = std::abs(md.cpu - target_cpu_per_node) / target_cpu_per_node;
+        double mem_waste_ratio = std::abs(md.memory - target_mem_per_node) / target_mem_per_node;
+        double waste_score = cpu_waste_ratio + mem_waste_ratio;
+
+        // Prefer MDs that are slightly larger than target (can fit more pods)
+        double size_bonus = 0.0;
+        if (md.cpu >= target_cpu_per_node && md.memory >= target_mem_per_node) {
+            size_bonus = -0.5;  // Bonus for being able to accommodate target
+        }
+
+        // Incorporate plugin score (higher = better)
+        double plugin_weight = plugin_scores[j] * 2.0;
+
+        // Combined score (lower is better for waste, but we want high plugin scores)
+        double combined_score = waste_score + size_bonus - plugin_weight;
+
+        md_scores.push_back({j, combined_score});
+    }
+
+    // Sort by combined score (lower is better)
+    std::sort(md_scores.begin(), md_scores.end(),
+              [](const MDFitScore& a, const MDFitScore& b) {
+                  return a.score < b.score;
+              });
+
+    vector<int> md_order;
+    md_order.reserve(md_scores.size());
+    for (const auto& ms : md_scores) {
+        md_order.push_back(ms.md_idx);
+    }
+
+    return md_order;
+}
+
 GreedyResult RunEnhancedGreedy(
     const MachineDeployment* mds,
     int num_mds,
@@ -553,8 +645,9 @@ GreedyResult RunEnhancedGreedy(
     // Sort pods by difficulty
     vector<int> pod_order = SortPodsByDifficulty(pods, num_pods, allowed_matrix, num_mds);
 
-    // Sort MDs by score
-    vector<int> md_order = SortMDsByScore(plugin_scores, num_mds);
+    // Calculate optimal MD order based on total resource requirements
+    vector<int> md_order = CalculateOptimalMDOrder(mds, num_mds, pods, num_pods,
+                                                     plugin_scores, allowed_matrix);
 
     // Phase 1: Place affinity groups
     for (const auto& group : affinity_groups) {
@@ -579,12 +672,15 @@ GreedyResult RunEnhancedGreedy(
                 continue;
             }
 
-            // Find best-fit slot
+            // Find best-fit slot using improved bin-packing strategy
             int best_slot = -1;
             double best_cost = std::numeric_limits<double>::infinity();
 
+            // First, try to pack into existing (partially filled) slots
+            // This implements a "Best-Fit Decreasing" strategy
             for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
-                if (slot_usage[md_idx][slot_idx].used) {
+                // Skip completely unused slots in first pass
+                if (!slot_usage[md_idx][slot_idx].used) {
                     continue;
                 }
 
@@ -612,12 +708,56 @@ GreedyResult RunEnhancedGreedy(
                     double waste = CalculateSlotWaste(md, slot_usage[md_idx][slot_idx], pods[pod_idx]);
                     double soft_penalty = CalculateSoftAffinityPenalty(pod_idx, md_idx, slot_idx,
                                                                        pods, result.assignments);
-                    cost = waste * 1000.0 + soft_penalty;
+                    // Prefer fuller slots (less remaining capacity = better fit)
+                    double remaining_capacity = slot_usage[md_idx][slot_idx].cpu_remaining +
+                                               slot_usage[md_idx][slot_idx].mem_remaining;
+                    cost = waste * 1000.0 + soft_penalty - (remaining_capacity * 10.0);
                 }
 
                 if (cost < best_cost) {
                     best_cost = cost;
                     best_slot = slot_idx;
+                }
+            }
+
+            // Second pass: if no existing slot works, try fresh slots
+            if (best_slot == -1) {
+                for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
+                    if (slot_usage[md_idx][slot_idx].used) {
+                        continue;  // Already checked in first pass
+                    }
+
+                    // Check allowed matrix
+                    if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
+                        continue;
+                    }
+
+                    // Check resource availability (should always fit in fresh slot if MD has capacity)
+                    if (pods[pod_idx].cpu > slot_usage[md_idx][slot_idx].cpu_remaining ||
+                        pods[pod_idx].memory > slot_usage[md_idx][slot_idx].mem_remaining) {
+                        continue;
+                    }
+
+                    // Check anti-affinity constraints
+                    if (HasAntiAffinityConflict(pod_idx, md_idx, slot_idx, pods, result.assignments)) {
+                        continue;
+                    }
+
+                    // Calculate placement cost
+                    double cost;
+                    if (HasColocateAffinityPreference(pod_idx, md_idx, slot_idx, pods, result.assignments)) {
+                        cost = -10000.0;  // Very high priority to colocate
+                    } else {
+                        double waste = CalculateSlotWaste(md, slot_usage[md_idx][slot_idx], pods[pod_idx]);
+                        double soft_penalty = CalculateSoftAffinityPenalty(pod_idx, md_idx, slot_idx,
+                                                                           pods, result.assignments);
+                        cost = waste * 1000.0 + soft_penalty;
+                    }
+
+                    if (cost < best_cost) {
+                        best_cost = cost;
+                        best_slot = slot_idx;
+                    }
                 }
             }
 

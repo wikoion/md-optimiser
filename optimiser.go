@@ -574,10 +574,10 @@ func OptimisePlacementRaw(
 	defer cleanupOutput()
 
 	// Prepare optional boolean parameters
-	var cScoreOnly *C.bool
+	var cScoreOnly *C._Bool
 	if scoreOnly != nil && *scoreOnly {
-		cScoreOnly = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
-		*cScoreOnly = C.bool(true)
+		cScoreOnly = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
+		*cScoreOnly = C._Bool(true)
 		defer C.free(unsafe.Pointer(cScoreOnly))
 	}
 
@@ -588,10 +588,10 @@ func OptimisePlacementRaw(
 		defer C.free(unsafe.Pointer(cMaxAttempts))
 	}
 
-	var cUseGreedyHint *C.bool
+	var cUseGreedyHint *C._Bool
 	if useGreedyHint != nil {
-		cUseGreedyHint = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
-		*cUseGreedyHint = C.bool(*useGreedyHint)
+		cUseGreedyHint = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
+		*cUseGreedyHint = C._Bool(*useGreedyHint)
 		defer C.free(unsafe.Pointer(cUseGreedyHint))
 	}
 
@@ -602,17 +602,17 @@ func OptimisePlacementRaw(
 		defer C.free(unsafe.Pointer(cGreedyHintAttempt))
 	}
 
-	var cFallbackToGreedy *C.bool
+	var cFallbackToGreedy *C._Bool
 	if fallbackToGreedy != nil {
-		cFallbackToGreedy = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
-		*cFallbackToGreedy = C.bool(*fallbackToGreedy)
+		cFallbackToGreedy = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
+		*cFallbackToGreedy = C._Bool(*fallbackToGreedy)
 		defer C.free(unsafe.Pointer(cFallbackToGreedy))
 	}
 
-	var cGreedyOnly *C.bool
+	var cGreedyOnly *C._Bool
 	if greedyOnly != nil {
-		cGreedyOnly = (*C.bool)(C.malloc(C.size_t(unsafe.Sizeof(C.bool(false)))))
-		*cGreedyOnly = C.bool(*greedyOnly)
+		cGreedyOnly = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
+		*cGreedyOnly = C._Bool(*greedyOnly)
 		defer C.free(unsafe.Pointer(cGreedyOnly))
 	}
 

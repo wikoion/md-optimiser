@@ -409,6 +409,7 @@ func main() {
 	greedyResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, greedyConfig)
 	greedyDuration := time.Since(greedyStart)
 
+	var greedyNodes int
 	if greedyResult.Succeeded {
 		// Calculate waste for greedy result
 		greedyWasteCPU, greedyWasteMem, greedyNodes := calculateWaste(greedyResult, mds, pods)
@@ -416,13 +417,50 @@ func main() {
 		fmt.Printf("✓ Success\n")
 		fmt.Printf("  Objective:      %.2f\n", greedyResult.Objective)
 		fmt.Printf("  Time:           %s\n", greedyDuration)
-		fmt.Printf("  Used Greedy:    %v\n", greedyResult.UsedGreedy)
+		fmt.Printf("  Used Beam Search: %v\n", greedyResult.UsedBeamSearch)
 		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
 		fmt.Printf("  Nodes Used:     %d\n", greedyNodes)
 		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", greedyWasteCPU, greedyWasteMem)
 	} else {
 		fmt.Printf("✗ Failed: %s\n", greedyResult.Message)
 		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
+	}
+
+	// Strategy 1b: Beam Search (Enhanced Greedy with Backtracking)
+	fmt.Println("\n[1b] Beam Search Mode (Greedy + Limited Backtracking)")
+	fmt.Println(strings.Repeat("-", 80))
+	beamStart := time.Now()
+	beamConfig := &optimiser.BeamSearchConfig{
+		BeamWidth:    optimiser.IntPtr(3),
+		MDCandidates: optimiser.IntPtr(3),
+	}
+	beamResult := optimiser.OptimisePlacementBeamSearch(mds, pods, scores, allowedMatrix, beamConfig)
+	beamDuration := time.Since(beamStart)
+
+	if beamResult.Succeeded {
+		// Calculate waste for beam search result
+		beamWasteCPU, beamWasteMem, beamNodes := calculateWaste(beamResult, mds, pods)
+
+		fmt.Printf("✓ Success\n")
+		fmt.Printf("  Objective:      %.2f\n", beamResult.Objective)
+		fmt.Printf("  Time:           %s\n", beamDuration)
+		fmt.Printf("  Beam Width:     3\n")
+		fmt.Printf("  MD Candidates:  5\n")
+		fmt.Printf("  Nodes Used:     %d\n", beamNodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", beamWasteCPU, beamWasteMem)
+
+		if greedyResult.Succeeded {
+			improvement := ((greedyResult.Objective - beamResult.Objective) / greedyResult.Objective) * 100.0
+			speedRatio := float64(beamDuration.Microseconds()) / float64(greedyDuration.Microseconds())
+			fmt.Printf("  vs Greedy:      %.2fx slower, %.1f%% better objective\n", speedRatio, improvement)
+			if beamNodes != greedyNodes {
+				nodeReduction := float64(greedyNodes-beamNodes) / float64(greedyNodes) * 100.0
+				fmt.Printf("  Node Reduction: %d → %d (%.1f%% fewer)\n", greedyNodes, beamNodes, nodeReduction)
+			}
+		}
+	} else {
+		fmt.Printf("✗ Failed: %s\n", beamResult.Message)
+		fmt.Printf("  Unplaced Pods:  %d\n", beamResult.UnplacedPods)
 	}
 
 	// Strategy 2: CP-SAT Only (Optimal but Slower)
@@ -474,8 +512,8 @@ func main() {
 		fmt.Printf("  Objective:      %.2f\n", hybridResult.Objective)
 		fmt.Printf("  Time:           %s\n", hybridDuration)
 		fmt.Printf("  Solve Time:     %.2fs\n", hybridResult.SolveTimeSecs)
-		fmt.Printf("  Used Greedy:    %v\n", hybridResult.UsedGreedy)
-		fmt.Printf("  Greedy Fallback: %v\n", hybridResult.GreedyFallback)
+		fmt.Printf("  Used Beam Search: %v\n", hybridResult.UsedBeamSearch)
+		fmt.Printf("  Beam Fallback:  %v\n", hybridResult.BeamSearchFallback)
 		fmt.Printf("  CP-SAT Attempts: %d\n", hybridResult.CPSATAttempts)
 		fmt.Printf("  Best Attempt:   %d\n", hybridResult.BestAttempt)
 		fmt.Printf("  Nodes Used:     %d\n", hybridNodes)
@@ -498,6 +536,14 @@ func main() {
 	} else {
 		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
 			"Greedy-Only", "N/A", greedyDuration, "✗")
+	}
+
+	if beamResult.Succeeded {
+		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
+			"Beam Search", beamResult.Objective, beamDuration, "✓")
+	} else {
+		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
+			"Beam Search", "N/A", beamDuration, "✗")
 	}
 
 	if cpsatResult.Succeeded {
@@ -526,6 +572,11 @@ func main() {
 		result = greedyResult
 		strategyName = "Greedy-Only"
 		bestObjective = greedyResult.Objective
+	}
+	if beamResult.Succeeded && beamResult.Objective < bestObjective {
+		result = beamResult
+		strategyName = "Beam Search"
+		bestObjective = beamResult.Objective
 	}
 	if cpsatResult.Succeeded && cpsatResult.Objective < bestObjective {
 		result = cpsatResult

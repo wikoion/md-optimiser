@@ -8,6 +8,7 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include <fstream>
 #include <cstdint>
 
 // Bring OR-Tools namespace into scope
@@ -63,8 +64,8 @@ struct SolverResult {
     double solve_time_secs;
     double current_state_cost;  // Cost of current state before optimization
     bool already_optimal;       // True if improvement doesn't meet threshold
-    bool used_greedy;           // True if greedy was used (hint or fallback)
-    bool greedy_fallback;       // True if pure greedy fallback was used
+    bool used_beam_search;      // True if beam search was used (hint or fallback)
+    bool beam_search_fallback;  // True if pure beam search fallback was used
     int cpsat_attempts;         // Number of CP-SAT attempts made
     int best_attempt;           // Which attempt produced the result
     int unplaced_pods;          // Number of pods that couldn't be placed
@@ -198,11 +199,11 @@ public:
 };
 
 // ============================================================================
-// GREEDY HEURISTIC IMPLEMENTATION
+// BEAM SEARCH HEURISTIC IMPLEMENTATION
 // ============================================================================
 
-// Structure to track pod assignment in greedy algorithm
-struct GreedyAssignment {
+// Structure to track pod assignment in beam search algorithm
+struct BeamAssignment {
     int md;
     int slot;
 };
@@ -232,7 +233,7 @@ bool HasAntiAffinityConflict(
     int md_idx,
     int slot_idx,
     const Pod* pods,
-    const vector<GreedyAssignment>& assignments
+    const vector<BeamAssignment>& assignments
 ) {
     const Pod& pod = pods[pod_idx];
 
@@ -243,7 +244,7 @@ bool HasAntiAffinityConflict(
         if (rule == -1) {  // Anti-affinity
             // Check if peer is already placed
             if (peer_idx >= 0 && peer_idx < static_cast<int>(assignments.size())) {
-                const GreedyAssignment& peer_assignment = assignments[peer_idx];
+                const BeamAssignment& peer_assignment = assignments[peer_idx];
                 if (peer_assignment.md == md_idx && peer_assignment.slot == slot_idx) {
                     return true;  // Conflict found
                 }
@@ -260,7 +261,7 @@ bool HasColocateAffinityPreference(
     int md_idx,
     int slot_idx,
     const Pod* pods,
-    const vector<GreedyAssignment>& assignments
+    const vector<BeamAssignment>& assignments
 ) {
     const Pod& pod = pods[pod_idx];
 
@@ -271,7 +272,7 @@ bool HasColocateAffinityPreference(
         if (rule == 1) {  // Colocate
             // Check if peer is already placed in this slot
             if (peer_idx >= 0 && peer_idx < static_cast<int>(assignments.size())) {
-                const GreedyAssignment& peer_assignment = assignments[peer_idx];
+                const BeamAssignment& peer_assignment = assignments[peer_idx];
                 if (peer_assignment.md == md_idx && peer_assignment.slot == slot_idx) {
                     return true;  // Preference match
                 }
@@ -288,7 +289,7 @@ double CalculateSoftAffinityPenalty(
     int md_idx,
     int slot_idx,
     const Pod* pods,
-    const vector<GreedyAssignment>& assignments
+    const vector<BeamAssignment>& assignments
 ) {
     const Pod& pod = pods[pod_idx];
     double penalty = 0.0;
@@ -298,7 +299,7 @@ double CalculateSoftAffinityPenalty(
         double affinity = pod.soft_affinities[i];
 
         if (peer_idx >= 0 && peer_idx < static_cast<int>(assignments.size())) {
-            const GreedyAssignment& peer_assignment = assignments[peer_idx];
+            const BeamAssignment& peer_assignment = assignments[peer_idx];
 
             if (peer_assignment.md != -1) {  // Peer is placed
                 bool same_slot = (peer_assignment.md == md_idx && peer_assignment.slot == slot_idx);
@@ -469,56 +470,125 @@ bool TryPlaceAffinityGroup(
     const int* allowed_matrix,
     int num_mds,
     vector<vector<SlotState>>& slot_usage,
-    vector<GreedyAssignment>& assignments
+    vector<BeamAssignment>& assignments
 ) {
+    // Calculate total resources needed for group
+    double total_cpu = 0.0;
+    double total_mem = 0.0;
+    for (int pod_idx : group) {
+        total_cpu += pods[pod_idx].cpu;
+        total_mem += pods[pod_idx].memory;
+    }
+
+    // PHASE 1: CLUSTER AUTOSCALER STRATEGY - Try ALL existing (used) slots first
+    // This is the key fix: prefer packing into existing nodes before creating new ones
+    int best_md = -1;
+    int best_slot = -1;
+    double best_score = -std::numeric_limits<double>::infinity();
+
+    for (int md_idx = 0; md_idx < num_mds; ++md_idx) {
+        const MachineDeployment& md = mds[md_idx];
+
+        // Check if all pods in group are allowed on this MD
+        bool all_allowed = true;
+        for (int pod_idx : group) {
+            if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
+                all_allowed = false;
+                break;
+            }
+        }
+        if (!all_allowed) continue;
+
+        // Try all EXISTING (used) slots in this MD
+        for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
+            if (!slot_usage[md_idx][slot_idx].used) {
+                continue;  // Skip empty slots in Phase 1
+            }
+
+            // Check if group fits in remaining capacity
+            if (total_cpu <= slot_usage[md_idx][slot_idx].cpu_remaining &&
+                total_mem <= slot_usage[md_idx][slot_idx].mem_remaining) {
+
+                // Score this placement - PREFER FULLER NODES (like Cluster Autoscaler)
+                double remaining_cpu = slot_usage[md_idx][slot_idx].cpu_remaining - total_cpu;
+                double remaining_mem = slot_usage[md_idx][slot_idx].mem_remaining - total_mem;
+
+                // Calculate utilization after placing group
+                double cpu_used_pct = 1.0 - (remaining_cpu / md.cpu);
+                double mem_used_pct = 1.0 - (remaining_mem / md.memory);
+                double avg_utilization = (cpu_used_pct + mem_used_pct) / 2.0;
+
+                // Higher score = better fit (fuller node)
+                double score = avg_utilization * 10000.0;  // 0-10000 range
+
+                // Small bonus for better plugin scores (but utilization dominates)
+                score += (md_idx < static_cast<int>(md_order.size()) ?
+                         (1000.0 / (1.0 + md_order[md_idx])) : 0.0);
+
+                if (score > best_score) {
+                    best_score = score;
+                    best_md = md_idx;
+                    best_slot = slot_idx;
+                }
+            }
+        }
+    }
+
+    // If we found an existing slot with capacity, use it
+    if (best_md != -1) {
+        for (int pod_idx : group) {
+            assignments[pod_idx] = {best_md, best_slot};
+        }
+        slot_usage[best_md][best_slot].cpu_remaining -= total_cpu;
+        slot_usage[best_md][best_slot].mem_remaining -= total_mem;
+        return true;
+    }
+
+    // PHASE 2: No existing slot found - create new node
+    // Try MDs in preferred order
     for (int md_idx : md_order) {
         const MachineDeployment& md = mds[md_idx];
 
+        // Check if all pods in group are allowed on this MD
+        bool all_allowed = true;
+        for (int pod_idx : group) {
+            if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
+                all_allowed = false;
+                break;
+            }
+        }
+        if (!all_allowed) continue;
+
+        // Check if group fits in MD capacity
+        if (total_cpu > md.cpu || total_mem > md.memory) {
+            continue;
+        }
+
+        // Find first empty slot in this MD
         for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
             if (slot_usage[md_idx][slot_idx].used) {
-                continue;
+                continue;  // Skip used slots in Phase 2
             }
 
-            // Check if all pods in group can fit
-            double total_cpu = 0.0;
-            double total_mem = 0.0;
-            bool all_allowed = true;
-
+            // Found empty slot - create new node here
             for (int pod_idx : group) {
-                total_cpu += pods[pod_idx].cpu;
-                total_mem += pods[pod_idx].memory;
-
-                if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
-                    all_allowed = false;
-                    break;
-                }
+                assignments[pod_idx] = {md_idx, slot_idx};
             }
 
-            if (!all_allowed) {
-                continue;
-            }
+            slot_usage[md_idx][slot_idx].used = true;
+            slot_usage[md_idx][slot_idx].cpu_remaining -= total_cpu;
+            slot_usage[md_idx][slot_idx].mem_remaining -= total_mem;
 
-            if (total_cpu <= md.cpu && total_mem <= md.memory) {
-                // Place all pods here
-                for (int pod_idx : group) {
-                    assignments[pod_idx] = {md_idx, slot_idx};
-                }
-
-                slot_usage[md_idx][slot_idx].used = true;
-                slot_usage[md_idx][slot_idx].cpu_remaining -= total_cpu;
-                slot_usage[md_idx][slot_idx].mem_remaining -= total_mem;
-
-                return true;
-            }
+            return true;
         }
     }
 
     return false;
 }
 
-// Main greedy placement algorithm
-struct GreedyResult {
-    vector<GreedyAssignment> assignments;
+// Main beam search placement algorithm result
+struct BeamResult {
+    vector<BeamAssignment> assignments;
     vector<vector<bool>> slots_used;
     bool all_placed;
     int unplaced_count;
@@ -541,10 +611,41 @@ vector<int> CalculateOptimalMDOrder(
         total_mem += pods[i].memory;
     }
 
-    // Estimate minimum nodes needed (rough heuristic)
+    // QUICK WIN #1 IMPROVEMENT: Calculate actual average MD capacity instead of hardcoded assumptions
+    double avg_md_cpu = 0.0;
+    double avg_md_mem = 0.0;
+    int viable_md_count = 0;
+
+    for (int j = 0; j < num_mds; ++j) {
+        // Only consider MDs that can host at least one pod
+        bool can_place_any = false;
+        for (int i = 0; i < num_pods; ++i) {
+            if (allowed_matrix[i * num_mds + j] &&
+                pods[i].cpu <= mds[j].cpu &&
+                pods[i].memory <= mds[j].memory) {
+                can_place_any = true;
+                break;
+            }
+        }
+        if (can_place_any) {
+            avg_md_cpu += mds[j].cpu;
+            avg_md_mem += mds[j].memory;
+            viable_md_count++;
+        }
+    }
+
+    if (viable_md_count > 0) {
+        avg_md_cpu /= viable_md_count;
+        avg_md_mem /= viable_md_count;
+    } else {
+        avg_md_cpu = 16.0;  // Fallback
+        avg_md_mem = 32.0;
+    }
+
+    // Estimate minimum nodes needed (using actual MD averages)
     int estimated_nodes = std::max(
-        static_cast<int>(std::ceil(total_cpu / 16.0)),  // Assume avg MD has ~16 CPU
-        static_cast<int>(std::ceil(total_mem / 32.0))   // Assume avg MD has ~32 GB
+        static_cast<int>(std::ceil(total_cpu / avg_md_cpu)),
+        static_cast<int>(std::ceil(total_mem / avg_md_mem))
     );
     estimated_nodes = std::max(3, estimated_nodes);  // At least 3 for anti-affinity
 
@@ -616,189 +717,445 @@ vector<int> CalculateOptimalMDOrder(
     return md_order;
 }
 
-GreedyResult RunEnhancedGreedy(
+
+// ============================================================================
+// BEAM SEARCH GREEDY - Enhanced backtracking bin-packing
+// ============================================================================
+
+// SearchState: Represents a partial solution during beam search
+struct SearchState {
+    vector<BeamAssignment> assignments;
+    vector<vector<SlotState>> slot_usage;
+    double waste_score;
+    int nodes_used;
+    int pods_placed;
+
+    // Default constructor (needed for vector::resize)
+    SearchState() : waste_score(0.0), nodes_used(0), pods_placed(0) {}
+
+    SearchState(int num_pods, int num_mds, const MachineDeployment* mds)
+        : assignments(num_pods, {-1, -1}),
+          slot_usage(num_mds),
+          waste_score(0.0),
+          nodes_used(0),
+          pods_placed(0) {
+        for (int i = 0; i < num_mds; ++i) {
+            slot_usage[i].resize(mds[i].max_scale_out);
+            for (int j = 0; j < mds[i].max_scale_out; ++j) {
+                slot_usage[i][j] = {false, mds[i].cpu, mds[i].memory};
+            }
+        }
+    }
+
+    // Clone state for branching
+    SearchState Clone() const {
+        SearchState copy = *this;
+        return copy;
+    }
+
+    // Calculate current waste in the state
+    double CalculateWaste(const MachineDeployment* mds, int num_mds,
+                         const double* plugin_scores) const {
+        double total_waste = 0.0;
+        int total_nodes = 0;
+
+        for (int md_idx = 0; md_idx < num_mds; ++md_idx) {
+            for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+                if (slot_usage[md_idx][slot_idx].used) {
+                    total_nodes++;
+                    // Waste = unused resources + cost penalty
+                    double cpu_waste = slot_usage[md_idx][slot_idx].cpu_remaining;
+                    double mem_waste = slot_usage[md_idx][slot_idx].mem_remaining;
+                    total_waste += cpu_waste + mem_waste;
+
+                    // Add machine cost (inverse of plugin score represents cost)
+                    total_waste += (10000.0 - plugin_scores[md_idx]);
+                }
+            }
+        }
+
+        // CRITICAL: Heavy penalty for node count (favor fewer nodes over less waste)
+        // This aligns with Cluster Autoscaler's bin-packing philosophy
+        total_waste += total_nodes * 100000.0;
+
+        return total_waste;
+    }
+};
+
+// Count nodes already in use for a specific MD type
+int CountNodesForMD(const SearchState& state, int md_idx,
+                   const MachineDeployment* mds) {
+    int count = 0;
+    for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+        if (state.slot_usage[md_idx][slot_idx].used) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// Check if pod can fit in any existing node of this MD type
+bool CanFitInExistingNode(int pod_idx, int md_idx, const SearchState& state,
+                          const Pod* pods, const MachineDeployment* mds) {
+    for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+        if (state.slot_usage[md_idx][slot_idx].used) {
+            if (pods[pod_idx].cpu <= state.slot_usage[md_idx][slot_idx].cpu_remaining &&
+                pods[pod_idx].memory <= state.slot_usage[md_idx][slot_idx].mem_remaining) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Select top N MD candidates for placing a pod (dynamic narrowing)
+vector<int> SelectTopMDsForPod(int pod_idx, const SearchState& state,
+                               const MachineDeployment* mds, int num_mds,
+                               const Pod* pods, const double* plugin_scores,
+                               const int* allowed_matrix, int limit) {
+    vector<pair<int, double>> md_scores;
+
+    for (int md_idx = 0; md_idx < num_mds; ++md_idx) {
+        // Check basic feasibility
+        if (!allowed_matrix[pod_idx * num_mds + md_idx]) continue;
+        if (pods[pod_idx].cpu > mds[md_idx].cpu ||
+            pods[pod_idx].memory > mds[md_idx].memory) continue;
+
+        // CRITICAL: Check if MD has ANY capacity (existing node with space OR ability to create new node)
+        bool can_fit_existing = CanFitInExistingNode(pod_idx, md_idx, state, pods, mds);
+        bool can_create_new = false;
+        for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+            if (!state.slot_usage[md_idx][slot_idx].used) {
+                can_create_new = true;
+                break;
+            }
+        }
+
+        // Skip this MD if it has no capacity at all
+        if (!can_fit_existing && !can_create_new) continue;
+
+        double score = 0.0;
+
+        // 1. STRONGEST PREFERENCE: Can fit in existing node of this MD type
+        if (can_fit_existing) {
+            score += 50000.0;  // Massive bonus for consolidation
+
+            // Additional bonus based on how full it would make the node
+            for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+                if (state.slot_usage[md_idx][slot_idx].used) {
+                    if (pods[pod_idx].cpu <= state.slot_usage[md_idx][slot_idx].cpu_remaining &&
+                        pods[pod_idx].memory <= state.slot_usage[md_idx][slot_idx].mem_remaining) {
+                        double cpu_util = pods[pod_idx].cpu / mds[md_idx].cpu;
+                        double mem_util = pods[pod_idx].memory / mds[md_idx].memory;
+                        score += (cpu_util + mem_util) * 1000.0;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 2. MODERATE PREFERENCE: Already have nodes of this MD type (create new node)
+        int existing_nodes = CountNodesForMD(state, md_idx, mds);
+        if (existing_nodes > 0) {
+            score += 10000.0 / (1.0 + existing_nodes);  // Diminishing returns
+        }
+
+        // 3. Resource fit quality (minimize waste if creating new node)
+        double cpu_fit = pods[pod_idx].cpu / mds[md_idx].cpu;
+        double mem_fit = pods[pod_idx].memory / mds[md_idx].memory;
+        double fit_score = std::min(cpu_fit, mem_fit);  // 0-1, higher = better fit
+        score += fit_score * 500.0;
+
+        // 4. Plugin score bonus (cost/preference)
+        score += plugin_scores[md_idx] * 5.0;
+
+        md_scores.push_back({md_idx, score});
+    }
+
+    // Sort by score descending
+    sort(md_scores.begin(), md_scores.end(),
+         [](const pair<int,double>& a, const pair<int,double>& b) {
+             return a.second > b.second;
+         });
+
+    // Return top N MD indices
+    vector<int> result;
+    for (int i = 0; i < std::min(limit, (int)md_scores.size()); ++i) {
+        result.push_back(md_scores[i].first);
+    }
+    return result;
+}
+
+// Try to place pod on existing node
+bool TryPlaceOnExistingNode(int pod_idx, int md_idx, SearchState& state,
+                            const MachineDeployment* mds, const Pod* pods) {
+    int best_slot = -1;
+    double best_util = -1.0;
+
+    // Find best existing slot (prefer fuller nodes)
+    for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+        if (state.slot_usage[md_idx][slot_idx].used) {
+            if (pods[pod_idx].cpu <= state.slot_usage[md_idx][slot_idx].cpu_remaining &&
+                pods[pod_idx].memory <= state.slot_usage[md_idx][slot_idx].mem_remaining) {
+
+                // Calculate utilization after placing
+                double cpu_util = 1.0 - ((state.slot_usage[md_idx][slot_idx].cpu_remaining - pods[pod_idx].cpu) / mds[md_idx].cpu);
+                double mem_util = 1.0 - ((state.slot_usage[md_idx][slot_idx].mem_remaining - pods[pod_idx].memory) / mds[md_idx].memory);
+                double avg_util = (cpu_util + mem_util) / 2.0;
+
+                if (avg_util > best_util) {
+                    best_util = avg_util;
+                    best_slot = slot_idx;
+                }
+            }
+        }
+    }
+
+    if (best_slot != -1) {
+        // Place pod
+        state.assignments[pod_idx] = {md_idx, best_slot};
+        state.slot_usage[md_idx][best_slot].cpu_remaining -= pods[pod_idx].cpu;
+        state.slot_usage[md_idx][best_slot].mem_remaining -= pods[pod_idx].memory;
+        state.pods_placed++;
+        return true;
+    }
+
+    return false;
+}
+
+// Try to place pod on new node
+bool TryPlaceOnNewNode(int pod_idx, int md_idx, SearchState& state,
+                      const MachineDeployment* mds, const Pod* pods) {
+    // Find first empty slot
+    for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+        if (!state.slot_usage[md_idx][slot_idx].used) {
+            // Create new node
+            state.assignments[pod_idx] = {md_idx, slot_idx};
+            state.slot_usage[md_idx][slot_idx].used = true;
+            state.slot_usage[md_idx][slot_idx].cpu_remaining -= pods[pod_idx].cpu;
+            state.slot_usage[md_idx][slot_idx].mem_remaining -= pods[pod_idx].memory;
+            state.nodes_used++;
+            state.pods_placed++;
+            return true;
+        }
+    }
+
+    return false;  // MD is full
+}
+
+// Main beam search algorithm
+BeamResult RunBeamSearch(
     const MachineDeployment* mds,
     int num_mds,
     const Pod* pods,
     int num_pods,
     const double* plugin_scores,
-    const int* allowed_matrix
+    const int* allowed_matrix,
+    int beam_width = 3,
+    int md_candidates = 5
 ) {
-    GreedyResult result;
-    result.assignments.resize(num_pods, {-1, -1});
-    result.slots_used.resize(num_mds);
-
-    // Initialize slot usage tracking
-    vector<vector<SlotState>> slot_usage(num_mds);
-    for (int j = 0; j < num_mds; ++j) {
-        slot_usage[j].resize(mds[j].max_scale_out);
-        result.slots_used[j].resize(mds[j].max_scale_out, false);
-
-        for (int k = 0; k < mds[j].max_scale_out; ++k) {
-            slot_usage[j][k] = {false, mds[j].cpu, mds[j].memory};
-        }
-    }
-
-    // Build affinity groups
+    // Build affinity groups (pods that MUST be placed together)
     vector<vector<int>> affinity_groups = BuildAffinityGroups(pods, num_pods);
 
-    // Sort pods by difficulty
-    vector<int> pod_order = SortPodsByDifficulty(pods, num_pods, allowed_matrix, num_mds);
-
-    // Calculate optimal MD order based on total resource requirements
+    // Calculate MD order for affinity group placement
     vector<int> md_order = CalculateOptimalMDOrder(mds, num_mds, pods, num_pods,
                                                      plugin_scores, allowed_matrix);
 
-    // Phase 1: Place affinity groups
+    // Initialize beam with empty state
+    vector<SearchState> beam;
+    beam.push_back(SearchState(num_pods, num_mds, mds));
+
+    // PHASE 1: Place affinity groups using best-fit strategy
+    // (Beam search doesn't help here since affinity groups must be placed together)
     for (const auto& group : affinity_groups) {
-        TryPlaceAffinityGroup(group, md_order, mds, pods, allowed_matrix,
-                             num_mds, slot_usage, result.assignments);
-    }
-
-    // Phase 2: Place remaining pods
-    for (int pod_idx : pod_order) {
-        if (result.assignments[pod_idx].md != -1) {
-            continue;  // Already placed as part of affinity group
-        }
-
-        bool placed = false;
-
-        // Try each MD in score order
-        for (int md_idx : md_order) {
-            const MachineDeployment& md = mds[md_idx];
-
-            // Resource check
-            if (pods[pod_idx].cpu > md.cpu || pods[pod_idx].memory > md.memory) {
-                continue;
-            }
-
-            // Find best-fit slot using improved bin-packing strategy
-            int best_slot = -1;
-            double best_cost = std::numeric_limits<double>::infinity();
-
-            // First, try to pack into existing (partially filled) slots
-            // This implements a "Best-Fit Decreasing" strategy
-            for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
-                // Skip completely unused slots in first pass
-                if (!slot_usage[md_idx][slot_idx].used) {
-                    continue;
-                }
-
-                // Check allowed matrix
-                if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
-                    continue;
-                }
-
-                // Check resource availability
-                if (pods[pod_idx].cpu > slot_usage[md_idx][slot_idx].cpu_remaining ||
-                    pods[pod_idx].memory > slot_usage[md_idx][slot_idx].mem_remaining) {
-                    continue;
-                }
-
-                // Check anti-affinity constraints
-                if (HasAntiAffinityConflict(pod_idx, md_idx, slot_idx, pods, result.assignments)) {
-                    continue;
-                }
-
-                // Calculate placement cost
-                double cost;
-                if (HasColocateAffinityPreference(pod_idx, md_idx, slot_idx, pods, result.assignments)) {
-                    cost = -10000.0;  // Very high priority to colocate
-                } else {
-                    double waste = CalculateSlotWaste(md, slot_usage[md_idx][slot_idx], pods[pod_idx]);
-                    double soft_penalty = CalculateSoftAffinityPenalty(pod_idx, md_idx, slot_idx,
-                                                                       pods, result.assignments);
-                    // Prefer fuller slots (less remaining capacity = better fit)
-                    double remaining_capacity = slot_usage[md_idx][slot_idx].cpu_remaining +
-                                               slot_usage[md_idx][slot_idx].mem_remaining;
-                    cost = waste * 1000.0 + soft_penalty - (remaining_capacity * 10.0);
-                }
-
-                if (cost < best_cost) {
-                    best_cost = cost;
-                    best_slot = slot_idx;
+        bool placed = TryPlaceAffinityGroup(group, md_order, mds, pods, allowed_matrix,
+                                           num_mds, beam[0].slot_usage, beam[0].assignments);
+        if (placed) {
+            for (int pod_idx : group) {
+                if (beam[0].assignments[pod_idx].md != -1) {
+                    beam[0].pods_placed++;
+                    // Update used flag
+                    int md = beam[0].assignments[pod_idx].md;
+                    int slot = beam[0].assignments[pod_idx].slot;
+                    beam[0].slot_usage[md][slot].used = true;
                 }
             }
-
-            // Second pass: if no existing slot works, try fresh slots
-            if (best_slot == -1) {
-                for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
-                    if (slot_usage[md_idx][slot_idx].used) {
-                        continue;  // Already checked in first pass
-                    }
-
-                    // Check allowed matrix
-                    if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
-                        continue;
-                    }
-
-                    // Check resource availability (should always fit in fresh slot if MD has capacity)
-                    if (pods[pod_idx].cpu > slot_usage[md_idx][slot_idx].cpu_remaining ||
-                        pods[pod_idx].memory > slot_usage[md_idx][slot_idx].mem_remaining) {
-                        continue;
-                    }
-
-                    // Check anti-affinity constraints
-                    if (HasAntiAffinityConflict(pod_idx, md_idx, slot_idx, pods, result.assignments)) {
-                        continue;
-                    }
-
-                    // Calculate placement cost
-                    double cost;
-                    if (HasColocateAffinityPreference(pod_idx, md_idx, slot_idx, pods, result.assignments)) {
-                        cost = -10000.0;  // Very high priority to colocate
-                    } else {
-                        double waste = CalculateSlotWaste(md, slot_usage[md_idx][slot_idx], pods[pod_idx]);
-                        double soft_penalty = CalculateSoftAffinityPenalty(pod_idx, md_idx, slot_idx,
-                                                                           pods, result.assignments);
-                        cost = waste * 1000.0 + soft_penalty;
-                    }
-
-                    if (cost < best_cost) {
-                        best_cost = cost;
-                        best_slot = slot_idx;
-                    }
-                }
-            }
-
-            // Place pod in best slot if found
-            if (best_slot != -1) {
-                result.assignments[pod_idx] = {md_idx, best_slot};
-                slot_usage[md_idx][best_slot].used = true;
-                slot_usage[md_idx][best_slot].cpu_remaining -= pods[pod_idx].cpu;
-                slot_usage[md_idx][best_slot].mem_remaining -= pods[pod_idx].memory;
-                placed = true;
-                break;
-            }
-        }
-
-        if (!placed) {
-            std::cerr << "Greedy: Could not place pod " << pod_idx << std::endl;
         }
     }
 
-    // Update slots_used from slot_usage
-    for (int j = 0; j < num_mds; ++j) {
-        for (int k = 0; k < mds[j].max_scale_out; ++k) {
-            result.slots_used[j][k] = slot_usage[j][k].used;
+    // PHASE 2: Beam search for remaining pods
+    // Sort pods by difficulty (largest, most constrained first)
+    vector<int> pod_order = SortPodsByDifficulty(pods, num_pods, allowed_matrix, num_mds);
+
+    // Optional debug file (disabled by default for performance)
+    // std::ofstream debug("/tmp/beam_debug_cpp.txt");
+    // debug << "Starting beam search with " << num_pods << " pods" << std::endl;
+    // debug << "Beam width: " << beam_width << ", MD candidates: " << md_candidates << std::endl;
+    // debug << "Affinity groups placed: " << affinity_groups.size() << std::endl;
+    // debug << "Pods already placed: " << beam[0].pods_placed << std::endl;
+
+    // Process each pod in order
+    for (int i = 0; i < (int)pod_order.size(); ++i) {
+        int pod_idx = pod_order[i];
+
+        // Skip pods already placed by affinity group logic
+        if (beam[0].assignments[pod_idx].md != -1) {
+            continue;
+        }
+
+        vector<SearchState> next_beam;
+
+        // debug << "\n=== Pod " << i << "/" << num_pods << " (idx=" << pod_idx << ") ===" << std::endl;
+        // debug << "Current beam size: " << beam.size() << std::endl;
+
+        // For each state in current beam
+        for (size_t beam_idx = 0; beam_idx < beam.size(); ++beam_idx) {
+            const SearchState& state = beam[beam_idx];
+
+            // CLUSTER AUTOSCALER STRATEGY: Try ALL existing nodes first (across all MDs)
+            vector<pair<int, int>> existing_options; // (md_idx, slot_idx) pairs
+            vector<double> existing_scores;
+
+            for (int md_idx = 0; md_idx < num_mds; ++md_idx) {
+                // Basic feasibility
+                if (!allowed_matrix[pod_idx * num_mds + md_idx]) continue;
+                if (pods[pod_idx].cpu > mds[md_idx].cpu ||
+                    pods[pod_idx].memory > mds[md_idx].memory) continue;
+
+                // Check all existing slots in this MD
+                for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+                    if (!state.slot_usage[md_idx][slot_idx].used) continue;
+
+                    // Can pod fit?
+                    if (pods[pod_idx].cpu > state.slot_usage[md_idx][slot_idx].cpu_remaining ||
+                        pods[pod_idx].memory > state.slot_usage[md_idx][slot_idx].mem_remaining) continue;
+
+                    // Score: prefer fuller nodes
+                    double cpu_util = 1.0 - ((state.slot_usage[md_idx][slot_idx].cpu_remaining - pods[pod_idx].cpu) / mds[md_idx].cpu);
+                    double mem_util = 1.0 - ((state.slot_usage[md_idx][slot_idx].mem_remaining - pods[pod_idx].memory) / mds[md_idx].memory);
+                    double score = (cpu_util + mem_util) / 2.0 * 10000.0 + plugin_scores[md_idx] * 10.0;
+
+                    existing_options.push_back({md_idx, slot_idx});
+                    existing_scores.push_back(score);
+                }
+            }
+
+            // debug << "  Beam state " << beam_idx << ": " << existing_options.size() << " existing slots, ";
+
+            // If we found existing slots, create states for top ones
+            if (!existing_options.empty()) {
+                // Sort by score (best first)
+                vector<int> indices(existing_options.size());
+                for (size_t k = 0; k < indices.size(); ++k) indices[k] = k;
+                sort(indices.begin(), indices.end(),
+                     [&](int a, int b) { return existing_scores[a] > existing_scores[b]; });
+
+                // Create states for top md_candidates existing placements
+                int limit = std::min(md_candidates, (int)existing_options.size());
+                for (int k = 0; k < limit; ++k) {
+                    int idx = indices[k];
+                    int md_idx = existing_options[idx].first;
+                    int slot_idx = existing_options[idx].second;
+
+                    SearchState new_state = state.Clone();
+                    new_state.assignments[pod_idx] = {md_idx, slot_idx};
+                    new_state.slot_usage[md_idx][slot_idx].cpu_remaining -= pods[pod_idx].cpu;
+                    new_state.slot_usage[md_idx][slot_idx].mem_remaining -= pods[pod_idx].memory;
+                    new_state.pods_placed++;
+                    new_state.waste_score = new_state.CalculateWaste(mds, num_mds, plugin_scores);
+                    next_beam.push_back(new_state);
+                }
+                // debug << "used top " << limit << " existing" << std::endl;
+            } else {
+                // No existing slots - need to create new nodes
+                // Get top MD choices for creating new nodes
+                vector<int> md_choices = SelectTopMDsForPod(pod_idx, state, mds, num_mds,
+                                                            pods, plugin_scores,
+                                                            allowed_matrix, md_candidates);
+
+                // debug << md_choices.size() << " new node options" << std::endl;
+
+                for (int md_idx : md_choices) {
+                    SearchState new_state = state.Clone();
+                    bool placed = TryPlaceOnNewNode(pod_idx, md_idx, new_state, mds, pods);
+
+                    if (placed) {
+                        new_state.waste_score = new_state.CalculateWaste(mds, num_mds, plugin_scores);
+                        next_beam.push_back(new_state);
+                    }
+                }
+            }
+        }
+
+        // debug << "Next beam size: " << next_beam.size() << std::endl;
+
+        // If no placements found, return failure
+        if (next_beam.empty()) {
+            // debug << "FAILURE: Beam became empty at pod " << i << "/" << num_pods << std::endl;
+            // debug.close();
+            BeamResult failure;
+            failure.assignments.resize(num_pods, {-1, -1});
+            failure.slots_used.resize(num_mds);
+            for (int j = 0; j < num_mds; ++j) {
+                failure.slots_used[j].resize(mds[j].max_scale_out, false);
+            }
+            failure.all_placed = false;
+            failure.unplaced_count = num_pods - i;
+            return failure;
+        }
+
+        // Keep only top beam_width states (lowest waste)
+        sort(next_beam.begin(), next_beam.end(),
+             [](const SearchState& a, const SearchState& b) {
+                 return a.waste_score < b.waste_score;
+             });
+
+        if ((int)next_beam.size() > beam_width) {
+            next_beam.resize(beam_width);
+        }
+
+        beam = next_beam;
+    }
+
+    // debug << "\n=== SUCCESS: All pods placed ===" << std::endl;
+    // debug.close();
+
+    // Return best state from final beam
+    if (beam.empty()) {
+        BeamResult failure;
+        failure.assignments.resize(num_pods, {-1, -1});
+        failure.slots_used.resize(num_mds);
+        for (int j = 0; j < num_mds; ++j) {
+            failure.slots_used[j].resize(mds[j].max_scale_out, false);
+        }
+        failure.all_placed = false;
+        failure.unplaced_count = num_pods;
+        return failure;
+    }
+
+    // Convert best SearchState to BeamResult
+    const SearchState& best = beam[0];
+    BeamResult result;
+    result.assignments = best.assignments;
+    result.slots_used.resize(num_mds);
+
+    // Convert slot_usage to slots_used (used flags)
+    for (int md_idx = 0; md_idx < num_mds; ++md_idx) {
+        result.slots_used[md_idx].resize(mds[md_idx].max_scale_out);
+        for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
+            result.slots_used[md_idx][slot_idx] = best.slot_usage[md_idx][slot_idx].used;
         }
     }
 
-    // Check if all pods placed
-    result.unplaced_count = 0;
-    for (const auto& assignment : result.assignments) {
-        if (assignment.md == -1) {
-            result.unplaced_count++;
-        }
-    }
-    result.all_placed = (result.unplaced_count == 0);
+    result.all_placed = (best.pods_placed == num_pods);
+    result.unplaced_count = num_pods - best.pods_placed;
 
     return result;
 }
 
 // Helper: Calculate solution cost (must match BuildCombinedObjective)
 double CalculateSolutionCost(
-    const vector<GreedyAssignment>& assignments,
+    const vector<BeamAssignment>& assignments,
     const vector<vector<bool>>& slots_used,
     const MachineDeployment* mds,
     int num_mds,
@@ -895,9 +1252,9 @@ double CalculateSolutionCost(
     return total_cost;
 }
 
-// Helper: Convert greedy result to hint matrix format
-vector<int> ConvertGreedyToHintMatrix(
-    const GreedyResult& greedy_result,
+// Helper: Convert beam result to hint matrix format
+vector<int> ConvertBeamToHintMatrix(
+    const BeamResult& beam_result,
     const MachineDeployment* mds,
     int num_mds,
     int num_pods
@@ -914,8 +1271,8 @@ vector<int> ConvertGreedyToHintMatrix(
     for (int i = 0; i < num_pods; ++i) {
         for (int j = 0; j < num_mds; ++j) {
             for (int k = 0; k < mds[j].max_scale_out; ++k) {
-                if (greedy_result.assignments[i].md == j &&
-                    greedy_result.assignments[i].slot == k) {
+                if (beam_result.assignments[i].md == j &&
+                    beam_result.assignments[i].slot == k) {
                     hint[offset] = 1;
                 }
                 offset++;
@@ -926,9 +1283,9 @@ vector<int> ConvertGreedyToHintMatrix(
     return hint;
 }
 
-// Helper: Copy greedy result to output arrays
-void CopyGreedyResultToOutput(
-    const GreedyResult& greedy_result,
+// Helper: Copy beam result to output arrays
+void CopyBeamResultToOutput(
+    const BeamResult& beam_result,
     const MachineDeployment* mds,
     int num_mds,
     int num_pods,
@@ -937,15 +1294,15 @@ void CopyGreedyResultToOutput(
 ) {
     // Copy assignments
     for (int i = 0; i < num_pods; ++i) {
-        out_slot_assignments[i * 2] = greedy_result.assignments[i].md;
-        out_slot_assignments[i * 2 + 1] = greedy_result.assignments[i].slot;
+        out_slot_assignments[i * 2] = beam_result.assignments[i].md;
+        out_slot_assignments[i * 2 + 1] = beam_result.assignments[i].slot;
     }
 
     // Copy slots_used
     int offset = 0;
     for (int j = 0; j < num_mds; ++j) {
         for (int k = 0; k < mds[j].max_scale_out; ++k) {
-            out_slots_used[offset++] = greedy_result.slots_used[j][k] ? 1 : 0;
+            out_slots_used[offset++] = beam_result.slots_used[j][k] ? 1 : 0;
         }
     }
 }
@@ -1005,7 +1362,7 @@ struct CPSATResult {
     double objective;
     int status_code;
     double solve_time_secs;
-    vector<GreedyAssignment> assignments;
+    vector<BeamAssignment> assignments;
     vector<vector<bool>> slots_used;
 };
 
@@ -1198,7 +1555,7 @@ CPSATResult RunCPSATSolverAttempt(
 }
 
 // ============================================================================
-// END GREEDY HEURISTIC IMPLEMENTATION
+// END BEAM SEARCH HEURISTIC IMPLEMENTATION
 // ============================================================================
 
 extern "C" {
@@ -1244,8 +1601,8 @@ SolverResult OptimisePlacement(
         result.status_code = static_cast<int>(FEASIBLE);
         result.solve_time_secs = 0.0;
         result.already_optimal = false;
-        result.used_greedy = false;
-        result.greedy_fallback = false;
+        result.used_beam_search = false;
+        result.beam_search_fallback = false;
         result.cpsat_attempts = 0;
         result.best_attempt = 0;
         result.unplaced_pods = 0;
@@ -1266,75 +1623,76 @@ SolverResult OptimisePlacement(
         return result;
     }
 
-    // Greedy-only mode
+    // Beam-search-only mode
     if (only_greedy) {
-        GreedyResult greedy_result = RunEnhancedGreedy(mds, num_mds, pods, num_pods,
-                                                        plugin_scores, allowed_matrix);
+        BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
+                                               plugin_scores, allowed_matrix,
+                                               3, 3);  // beam_width=3, md_candidates=3
 
-        if (!greedy_result.all_placed) {
+        if (!beam_result.all_placed) {
             result.success = false;
-            result.unplaced_pods = greedy_result.unplaced_count;
-            result.used_greedy = true;
-            result.greedy_fallback = true;
+            result.unplaced_pods = beam_result.unplaced_count;
+            result.used_beam_search = true;
+            result.beam_search_fallback = true;
             result.cpsat_attempts = 0;
             return result;
         }
 
-        double greedy_score = CalculateSolutionCost(greedy_result.assignments,
-                                                     greedy_result.slots_used,
-                                                     mds, num_mds, pods, num_pods,
-                                                     plugin_scores);
+        double beam_score = CalculateSolutionCost(beam_result.assignments,
+                                                  beam_result.slots_used,
+                                                  mds, num_mds, pods, num_pods,
+                                                  plugin_scores);
 
         // If current_state_cost is 0 or very small (pods unplaced), any valid placement is acceptable
         bool accept_solution = false;
         if (current_state_cost < 1.0) {
-            // No current placement - any valid greedy solution is acceptable
+            // No current placement - any valid beam search solution is acceptable
             accept_solution = true;
         } else {
-            double improvement_pct = (current_state_cost - greedy_score) / current_state_cost * 100.0;
-            accept_solution = (greedy_score < current_state_cost && improvement_pct >= threshold);
+            double improvement_pct = (current_state_cost - beam_score) / current_state_cost * 100.0;
+            accept_solution = (beam_score < current_state_cost && improvement_pct >= threshold);
         }
 
         if (accept_solution) {
-            CopyGreedyResultToOutput(greedy_result, mds, num_mds, num_pods,
-                                     out_slot_assignments, out_slots_used);
+            CopyBeamResultToOutput(beam_result, mds, num_mds, num_pods,
+                                   out_slot_assignments, out_slots_used);
             result.success = true;
-            result.objective = greedy_score;
+            result.objective = beam_score;
             result.status_code = static_cast<int>(FEASIBLE);
             result.already_optimal = false;
-            result.used_greedy = true;
-            result.greedy_fallback = true;
+            result.used_beam_search = true;
+            result.beam_search_fallback = true;
             result.cpsat_attempts = 0;
             result.best_attempt = 0;
             result.unplaced_pods = 0;
             return result;
-        } else if (greedy_score < current_state_cost) {
+        } else if (beam_score < current_state_cost) {
             // Improves but not enough
-            CopyGreedyResultToOutput(greedy_result, mds, num_mds, num_pods,
-                                     out_slot_assignments, out_slots_used);
+            CopyBeamResultToOutput(beam_result, mds, num_mds, num_pods,
+                                   out_slot_assignments, out_slots_used);
             result.success = true;
-            result.objective = greedy_score;
+            result.objective = beam_score;
             result.status_code = static_cast<int>(FEASIBLE);
             result.already_optimal = true;
-            result.used_greedy = true;
-            result.greedy_fallback = true;
+            result.used_beam_search = true;
+            result.beam_search_fallback = true;
             result.cpsat_attempts = 0;
             result.best_attempt = 0;
             result.unplaced_pods = 0;
             return result;
         } else {
             result.success = false;
-            result.objective = greedy_score;
-            result.used_greedy = true;
-            result.greedy_fallback = true;
+            result.objective = beam_score;
+            result.used_beam_search = true;
+            result.beam_search_fallback = true;
             result.cpsat_attempts = 0;
             return result;
         }
     }
 
     // Main optimization loop with CP-SAT
-    vector<int> greedy_hint_matrix;
-    bool greedy_hint_generated = false;
+    vector<int> beam_hint_matrix;
+    bool beam_hint_generated = false;
     double best_score = std::numeric_limits<double>::infinity();
     CPSATResult best_cpsat_result;
     bool have_best = false;
@@ -1346,16 +1704,17 @@ SolverResult OptimisePlacement(
         if (initial_assignment != nullptr) {
             // User-provided hint always takes precedence
             hint_to_use = initial_assignment;
-        } else if (do_greedy_hint && attempt == greedy_hint_at && !greedy_hint_generated) {
-            // Generate greedy hint on specified attempt
-            GreedyResult greedy_result = RunEnhancedGreedy(mds, num_mds, pods, num_pods,
-                                                            plugin_scores, allowed_matrix);
-            if (greedy_result.all_placed) {
-                greedy_hint_matrix = ConvertGreedyToHintMatrix(greedy_result, mds, num_mds, num_pods);
-                hint_to_use = greedy_hint_matrix.data();
-                greedy_hint_generated = true;
-                result.used_greedy = true;
-                std::cerr << "Using greedy hint for attempt " << attempt << std::endl;
+        } else if (do_greedy_hint && attempt == greedy_hint_at && !beam_hint_generated) {
+            // Generate beam search hint on specified attempt
+            BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
+                                                   plugin_scores, allowed_matrix,
+                                                   3, 3);  // beam_width=3, md_candidates=3
+            if (beam_result.all_placed) {
+                beam_hint_matrix = ConvertBeamToHintMatrix(beam_result, mds, num_mds, num_pods);
+                hint_to_use = beam_hint_matrix.data();
+                beam_hint_generated = true;
+                result.used_beam_search = true;
+                std::cerr << "Using beam search hint for attempt " << attempt << std::endl;
             }
         }
 
@@ -1392,7 +1751,7 @@ SolverResult OptimisePlacement(
 
             if (accept_solution) {
                 // Solution meets criteria - return immediately
-                CopyGreedyResultToOutput(GreedyResult{
+                CopyBeamResultToOutput(BeamResult{
                     cpsat_result.assignments,
                     cpsat_result.slots_used,
                     true,
@@ -1427,7 +1786,7 @@ SolverResult OptimisePlacement(
 
     if (have_acceptable_best) {
 
-        CopyGreedyResultToOutput(GreedyResult{
+        CopyBeamResultToOutput(BeamResult{
             best_cpsat_result.assignments,
             best_cpsat_result.slots_used,
             true,
@@ -1444,49 +1803,50 @@ SolverResult OptimisePlacement(
         return result;
     }
 
-    // No valid CP-SAT solution found - try greedy fallback
+    // No valid CP-SAT solution found - try beam search fallback
     if (do_fallback) {
-        GreedyResult greedy_result = RunEnhancedGreedy(mds, num_mds, pods, num_pods,
-                                                        plugin_scores, allowed_matrix);
+        BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
+                                               plugin_scores, allowed_matrix,
+                                               3, 3);  // beam_width=3, md_candidates=3
 
-        if (greedy_result.all_placed) {
-            double greedy_score = CalculateSolutionCost(greedy_result.assignments,
-                                                        greedy_result.slots_used,
-                                                        mds, num_mds, pods, num_pods,
-                                                        plugin_scores);
+        if (beam_result.all_placed) {
+            double beam_score = CalculateSolutionCost(beam_result.assignments,
+                                                      beam_result.slots_used,
+                                                      mds, num_mds, pods, num_pods,
+                                                      plugin_scores);
 
             // If current_state_cost is 0 or very small (pods unplaced), any valid placement is acceptable
             bool accept_solution = false;
             if (current_state_cost < 1.0) {
-                // No current placement - any valid greedy solution is acceptable
+                // No current placement - any valid beam search solution is acceptable
                 accept_solution = true;
             } else {
-                double improvement_pct = (current_state_cost - greedy_score) / current_state_cost * 100.0;
-                accept_solution = (greedy_score < current_state_cost && improvement_pct >= threshold);
+                double improvement_pct = (current_state_cost - beam_score) / current_state_cost * 100.0;
+                accept_solution = (beam_score < current_state_cost && improvement_pct >= threshold);
             }
 
             if (accept_solution) {
-                CopyGreedyResultToOutput(greedy_result, mds, num_mds, num_pods,
-                                         out_slot_assignments, out_slots_used);
+                CopyBeamResultToOutput(beam_result, mds, num_mds, num_pods,
+                                       out_slot_assignments, out_slots_used);
                 result.success = true;
-                result.objective = greedy_score;
+                result.objective = beam_score;
                 result.status_code = static_cast<int>(FEASIBLE);
                 result.already_optimal = false;
-                result.used_greedy = true;
-                result.greedy_fallback = true;
+                result.used_beam_search = true;
+                result.beam_search_fallback = true;
                 result.best_attempt = 0;
                 result.unplaced_pods = 0;
                 return result;
-            } else if (greedy_score < current_state_cost) {
+            } else if (beam_score < current_state_cost) {
                 // Improves but doesn't meet threshold
-                CopyGreedyResultToOutput(greedy_result, mds, num_mds, num_pods,
-                                         out_slot_assignments, out_slots_used);
+                CopyBeamResultToOutput(beam_result, mds, num_mds, num_pods,
+                                       out_slot_assignments, out_slots_used);
                 result.success = true;
-                result.objective = greedy_score;
+                result.objective = beam_score;
                 result.status_code = static_cast<int>(FEASIBLE);
                 result.already_optimal = true;
-                result.used_greedy = true;
-                result.greedy_fallback = true;
+                result.used_beam_search = true;
+                result.beam_search_fallback = true;
                 result.best_attempt = 0;
                 result.unplaced_pods = 0;
                 return result;
@@ -1496,6 +1856,91 @@ SolverResult OptimisePlacement(
 
     // No solution found that improves current state
     result.success = false;
+    return result;
+}
+
+// ============================================================================
+// Beam Search API - Enhanced greedy with limited backtracking
+// ============================================================================
+
+__attribute__((visibility("default")))
+SolverResult OptimisePlacementBeamSearch(
+    const MachineDeployment* mds, int num_mds,
+    const Pod* pods, int num_pods,
+    const double* plugin_scores,
+    const int* allowed_matrix,
+    int* out_slot_assignments,
+    uint8_t* out_slots_used,
+    const int* beam_width,        // Beam width (default: 3)
+    const int* md_candidates      // MD candidates per pod (default: 5)
+) {
+    {
+        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
+        debug << ">>> OptimisePlacementBeamSearch ENTERED: " << num_pods << " pods, " << num_mds << " MDs" << std::endl;
+    }
+
+    SolverResult result = {false, 0.0, 0, 0.0, 0.0, false, false, false, 0, 0, 0};
+
+    // Parse parameters with defaults
+    int width = (beam_width != nullptr) ? *beam_width : 3;
+    int candidates = (md_candidates != nullptr) ? *md_candidates : 5;
+
+    // Validate parameters
+    if (width < 1) width = 1;
+    if (width > 10) width = 10;  // Limit max beam width to prevent explosion
+    if (candidates < 1) candidates = 1;
+    if (candidates > 20) candidates = 20;  // Limit max candidates
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    // Run beam search
+    BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
+                                           plugin_scores, allowed_matrix,
+                                           width, candidates);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+
+    {
+        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
+        debug << ">>> all_placed=" << beam_result.all_placed << ", unplaced_count=" << beam_result.unplaced_count << std::endl;
+    }
+
+    // Check if all pods placed
+    if (!beam_result.all_placed) {
+        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
+        debug << ">>> EARLY RETURN: not all placed" << std::endl;
+        result.success = false;
+        result.unplaced_pods = beam_result.unplaced_count;
+        result.used_beam_search = true;
+        result.solve_time_secs = elapsed.count();
+        return result;
+    }
+
+    {
+        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
+        debug << ">>> SUCCESS PATH" << std::endl;
+    }
+
+    // Calculate score
+    double score = CalculateSolutionCost(beam_result.assignments,
+                                         beam_result.slots_used,
+                                         mds, num_mds, pods, num_pods,
+                                         plugin_scores);
+
+    // Copy result to output
+    CopyBeamResultToOutput(beam_result, mds, num_mds, num_pods,
+                           out_slot_assignments, out_slots_used);
+
+    result.success = true;
+    result.objective = score;
+    result.status_code = static_cast<int>(FEASIBLE);
+    result.solve_time_secs = elapsed.count();
+    result.used_beam_search = true;
+    result.cpsat_attempts = 0;
+    result.best_attempt = 1;
+    result.unplaced_pods = 0;
+
     return result;
 }
 

@@ -10,6 +10,7 @@ package optimiser
 #include <dlfcn.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifndef RTLD_DEFAULT
 #define RTLD_DEFAULT ((void *) 0)
@@ -39,14 +40,14 @@ typedef struct {
 } Pod;
 
 typedef struct {
-    _Bool success;          // Whether a valid solution was found
-    double objective;       // Objective value of the solution
-    int status_code;        // Solver status (e.g., 2 = feasible)
-    double solve_time_secs; // Time solver spent in seconds
+    _Bool success;             // Whether a valid solution was found
+    double objective;          // Objective value of the solution
+    int status_code;           // Solver status (e.g., 2 = feasible)
+    double solve_time_secs;    // Time solver spent in seconds
     double current_state_cost; // Cost of current state before optimization
     _Bool already_optimal;     // True if improvement doesn't meet threshold
-    _Bool used_greedy;         // True if greedy was used (hint or fallback)
-    _Bool greedy_fallback;     // True if pure greedy fallback was used
+    _Bool used_beam_search;    // True if beam search was used (hint or fallback)
+    _Bool beam_search_fallback;// True if pure beam search fallback was used
     int cpsat_attempts;        // Number of CP-SAT attempts made
     int best_attempt;          // Which attempt produced the result
     int unplaced_pods;         // Number of pods that couldn't be placed
@@ -109,6 +110,53 @@ SolverResult call_optimise_placement_with_handle(
                 out_slots_used, max_runtime_secs, improvement_threshold, score_only,
                 max_attempts, use_greedy_hint, greedy_hint_attempt,
                 fallback_to_greedy, greedy_only);
+}
+
+// C wrapper function for beam search optimization
+SolverResult call_optimise_placement_beam_search(
+    void* lib_handle,
+    const MachineDeployment* mds, int num_mds,
+    const Pod* pods, int num_pods,
+    const double* plugin_scores,
+    const int* allowed_matrix,
+    int* out_slot_assignments,
+    uint8_t* out_slots_used,
+    const int* beam_width,
+    const int* md_candidates
+) {
+    // Get the function pointer using dlsym with the specific handle
+    void* sym = dlsym(lib_handle, "OptimisePlacementBeamSearch");
+    if (!sym) {
+        char* error1 = dlerror();
+        // Try with underscore prefix (macOS)
+        sym = dlsym(lib_handle, "_OptimisePlacementBeamSearch");
+        if (!sym) {
+            char* error2 = dlerror();
+            fprintf(stderr, "ERROR: Failed to find OptimisePlacementBeamSearch: %s, %s\n",
+                    error1 ? error1 : "null", error2 ? error2 : "null");
+            SolverResult err_result = {0, 0.0, -1, 0.0, 0.0, 0, 0, 0, 0, 0, 0};
+            return err_result;
+        }
+    }
+
+    // Cast to the correct function pointer type
+    typedef SolverResult (*OptimisePlacementBeamSearchFunc)(
+        const MachineDeployment*, int,
+        const Pod*, int,
+        const double*,
+        const int*,
+        int*,
+        uint8_t*,
+        const int*,
+        const int*
+    );
+
+    OptimisePlacementBeamSearchFunc func = (OptimisePlacementBeamSearchFunc)sym;
+
+    // Call the function
+    return func(mds, num_mds, pods, num_pods, plugin_scores,
+                allowed_matrix, out_slot_assignments, out_slots_used,
+                beam_width, md_candidates);
 }
 */
 import "C"
@@ -175,13 +223,13 @@ type Result struct {
 	SolverStatus     int
 	SolveTimeSecs    float64
 	Message          string
-	CurrentStateCost float64 // Cost of the current state before optimization
-	AlreadyOptimal   bool    // True if improvement doesn't meet threshold
-	UsedGreedy       bool    // True if greedy algorithm was used (hint or fallback)
-	GreedyFallback   bool    // True if pure greedy fallback was used (not just hint)
-	CPSATAttempts    int     // Number of CP-SAT attempts made
-	BestAttempt      int     // Which attempt produced the result (0 = greedy-only)
-	UnplacedPods     int     // Number of pods that couldn't be placed (greedy only)
+	CurrentStateCost    float64 // Cost of the current state before optimization
+	AlreadyOptimal      bool    // True if improvement doesn't meet threshold
+	UsedBeamSearch      bool    // True if beam search algorithm was used (hint or fallback)
+	BeamSearchFallback  bool    // True if pure beam search fallback was used (not just hint)
+	CPSATAttempts       int     // Number of CP-SAT attempts made
+	BestAttempt         int     // Which attempt produced the result (0 = beam-search-only)
+	UnplacedPods        int     // Number of pods that couldn't be placed (beam search only)
 }
 
 func makeCIntSlice(data []int) *C.int {
@@ -403,8 +451,8 @@ func parseResults(
 		Message:          "",
 		CurrentStateCost: float64(res.current_state_cost),
 		AlreadyOptimal:   bool(res.already_optimal),
-		UsedGreedy:       bool(res.used_greedy),
-		GreedyFallback:   bool(res.greedy_fallback),
+		UsedBeamSearch:     bool(res.used_beam_search),
+		BeamSearchFallback: bool(res.beam_search_fallback),
 		CPSATAttempts:    int(res.cpsat_attempts),
 		BestAttempt:      int(res.best_attempt),
 		UnplacedPods:     int(res.unplaced_pods),
@@ -612,4 +660,173 @@ func OptimisePlacement(
 		ScoreOnly:            scoreOnly,
 	}
 	return OptimisePlacementRaw(mds, pods, pluginScores, allowedMatrix, initialAssignment, config)
+}
+
+// ============================================================================
+// Beam Search Optimization - Enhanced greedy with limited backtracking
+// ============================================================================
+
+// BeamSearchConfig holds configuration for beam search optimization
+type BeamSearchConfig struct {
+	BeamWidth    *int // Number of partial solutions to keep at each step (default: 3, max: 10)
+	MDCandidates *int // Number of MD types to try per pod (default: 5, max: 20)
+}
+
+// OptimisePlacementBeamSearch runs beam search optimization
+// This is a greedy algorithm with limited backtracking - faster than CP-SAT but better than pure greedy
+func OptimisePlacementBeamSearch(
+	mds []MachineDeployment,
+	pods []Pod,
+	pluginScores []float64,
+	allowedMatrix []int,
+	config *BeamSearchConfig,
+) Result {
+	if err := extractAndLoadSharedLibrary(); err != nil {
+		return Result{Message: fmt.Sprintf("Failed to load optimiser lib: %v", err)}
+	}
+
+	if config == nil {
+		config = &BeamSearchConfig{}
+	}
+
+	numMDs := len(mds)
+	slotsPerMD := make([]int, numMDs)
+	for i, md := range mds {
+		slotsPerMD[i] = md.GetMaxScaleOut()
+	}
+	numPods := len(pods)
+
+	// Build C structures using existing helpers
+	cMDs, _, cleanupMDs := convertMachineDeployments(mds)
+	defer cleanupMDs()
+
+	cPods, hardPtrs, softPtrs := convertPods(pods)
+	defer func() {
+		for _, ptr := range hardPtrs {
+			C.free(ptr)
+		}
+		for _, ptr := range softPtrs {
+			C.free(ptr)
+		}
+	}()
+
+	cPluginScores := makeCDoubleSlice(pluginScores)
+	defer C.free(unsafe.Pointer(cPluginScores))
+
+	// Build allowed matrix if not provided
+	if allowedMatrix == nil {
+		allowedMatrix = make([]int, numPods*numMDs)
+		for i := 0; i < numPods*numMDs; i++ {
+			allowedMatrix[i] = 1 // All pods allowed on all MDs by default
+		}
+	}
+
+	cAllowedMatrix := makeCIntSlice(allowedMatrix)
+	defer C.free(unsafe.Pointer(cAllowedMatrix))
+
+	// Allocate output buffers (assignments are [MD, Slot] pairs, so 2*numPods)
+	cOutAssignments := (*C.int)(C.malloc(C.size_t(len(pods)*2) * C.size_t(unsafe.Sizeof(C.int(0)))))
+	defer C.free(unsafe.Pointer(cOutAssignments))
+
+	totalSlots := 0
+	for _, md := range mds {
+		totalSlots += md.GetMaxScaleOut()
+	}
+	cOutSlotsUsed := (*C.uint8_t)(C.malloc(C.size_t(totalSlots)))
+	defer C.free(unsafe.Pointer(cOutSlotsUsed))
+
+	// Prepare beam search parameters
+	var cBeamWidth *C.int
+	if config.BeamWidth != nil {
+		width := C.int(*config.BeamWidth)
+		cBeamWidth = &width
+	}
+
+	var cMDCandidates *C.int
+	if config.MDCandidates != nil {
+		candidates := C.int(*config.MDCandidates)
+		cMDCandidates = &candidates
+	}
+
+	// Call the C beam search function
+	var cResult C.SolverResult
+	libHandle := GetLibHandle()
+	fmt.Printf("DEBUG: libHandle=%v\n", libHandle)
+
+	if libHandle != nil {
+		fmt.Printf("DEBUG: Calling beam search C function...\n")
+		cResult = C.call_optimise_placement_beam_search(
+			libHandle,
+			(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(len(mds)),
+			(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(len(pods)),
+			cPluginScores,
+			cAllowedMatrix,
+			cOutAssignments,
+			cOutSlotsUsed,
+			cBeamWidth,
+			cMDCandidates,
+		)
+		fmt.Printf("DEBUG: C function returned\n")
+	} else {
+		// Fallback error
+		fmt.Printf("DEBUG: Library not loaded!\n")
+		return Result{
+			Succeeded: false,
+			Message:   "library not loaded",
+		}
+	}
+
+	// Parse results
+	succeeded := bool(cResult.success)
+	objective := float64(cResult.objective)
+	status := int(cResult.status_code)
+	solveTime := float64(cResult.solve_time_secs)
+	unplacedPods := int(cResult.unplaced_pods)
+
+	// DEBUG
+	fmt.Printf("DEBUG Go: cResult.success=%v, objective=%.2f, unplaced=%d\n", cResult.success, objective, unplacedPods)
+
+	result := Result{
+		Succeeded:     succeeded,
+		Objective:     objective,
+		SolverStatus:  status,
+		SolveTimeSecs: solveTime,
+		UsedBeamSearch: true, // Beam search is the heuristic
+		UnplacedPods:  unplacedPods,
+	}
+
+	if succeeded {
+		result.Message = fmt.Sprintf("Beam search succeeded (%.2fms)", solveTime*1000)
+	} else {
+		result.Message = fmt.Sprintf("Beam search failed: %d pods unplaced", unplacedPods)
+		return result
+	}
+
+	// Parse assignments (format: [MD, Slot, MD, Slot, ...])
+	assignments := make([]PodSlotAssignment, len(pods))
+	goAssignments := (*[1 << 30]C.int)(unsafe.Pointer(cOutAssignments))[:len(pods)*2:len(pods)*2]
+	for i := range pods {
+		assignments[i] = PodSlotAssignment{
+			MD:   int(goAssignments[i*2]),
+			Slot: int(goAssignments[i*2+1]),
+		}
+	}
+
+	// Parse slots_used
+	goSlotsUsed := (*[1 << 30]C.uint8_t)(unsafe.Pointer(cOutSlotsUsed))[:totalSlots:totalSlots]
+	slotsUsed := make([][]bool, len(mds))
+	offset := 0
+	for i, md := range mds {
+		maxScaleOut := md.GetMaxScaleOut()
+		slotsUsed[i] = make([]bool, maxScaleOut)
+		for j := 0; j < maxScaleOut; j++ {
+			slotsUsed[i][j] = goSlotsUsed[offset+j] != 0
+		}
+		offset += maxScaleOut
+	}
+
+	result.PodAssignments = assignments
+	result.SlotsUsed = slotsUsed
+
+	return result
 }

@@ -426,14 +426,14 @@ func TestOptimisePlacementRaw_GreedyOnly(t *testing.T) {
 		t.Fatalf("Expected greedy-only to succeed: %s", result.Message)
 	}
 
-	assert.True(t, result.UsedGreedy, "Expected UsedGreedy to be true")
-	assert.True(t, result.GreedyFallback, "Expected GreedyFallback to be true")
+	assert.True(t, result.UsedBeamSearch, "Expected UsedBeamSearch to be true")
+	assert.True(t, result.BeamSearchFallback, "Expected BeamSearchFallback to be true")
 	assert.Equal(t, 0, result.CPSATAttempts, "Expected 0 CP-SAT attempts in greedy-only mode")
 	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
 
 	t.Logf("Greedy-only test successful:")
 	t.Logf("  Objective: %.2f", result.Objective)
-	t.Logf("  Used Greedy: %v", result.UsedGreedy)
+	t.Logf("  Used Beam Search: %v", result.UsedBeamSearch)
 	t.Logf("  Assignments: %v", result.PodAssignments)
 }
 
@@ -478,7 +478,7 @@ func TestOptimisePlacementRaw_GreedyHint(t *testing.T) {
 
 	t.Logf("Greedy hint test successful:")
 	t.Logf("  Objective: %.2f", result.Objective)
-	t.Logf("  Used Greedy: %v", result.UsedGreedy)
+	t.Logf("  Used Beam Search: %v", result.UsedBeamSearch)
 	t.Logf("  CP-SAT Attempts: %d", result.CPSATAttempts)
 	t.Logf("  Best Attempt: %d", result.BestAttempt)
 }
@@ -523,8 +523,8 @@ func TestOptimisePlacementRaw_GreedyFallback(t *testing.T) {
 
 	t.Logf("Greedy fallback test successful:")
 	t.Logf("  Objective: %.2f", result.Objective)
-	t.Logf("  Used Greedy: %v", result.UsedGreedy)
-	t.Logf("  Greedy Fallback: %v", result.GreedyFallback)
+	t.Logf("  Used Beam Search: %v", result.UsedBeamSearch)
+	t.Logf("  Beam Search Fallback: %v", result.BeamSearchFallback)
 	t.Logf("  CP-SAT Attempts: %d", result.CPSATAttempts)
 }
 
@@ -596,8 +596,8 @@ func TestOptimisePlacementRaw_BackwardCompatibility(t *testing.T) {
 	}
 
 	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
-	assert.False(t, result.UsedGreedy, "Expected not to use greedy with nil config")
-	assert.False(t, result.GreedyFallback, "Expected no greedy fallback with nil config")
+	assert.False(t, result.UsedBeamSearch, "Expected not to use beam search with nil config")
+	assert.False(t, result.BeamSearchFallback, "Expected no beam search fallback with nil config")
 
 	t.Logf("Backward compatibility test successful:")
 	t.Logf("  Objective: %.2f", result.Objective)

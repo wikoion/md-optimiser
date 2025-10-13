@@ -115,7 +115,7 @@ Use greedy as a safety net if all CP-SAT attempts fail:
 ```go
 config := &optimiser.OptimizationConfig{
     MaxAttempts:      optimiser.IntPtr(3),
-    FallbackToGreedy: optimiser.BoolPtr(true),
+    FallbackToBeamSearch: optimiser.BoolPtr(true),
     MaxRuntimeSeconds: optimiser.IntPtr(5),
 }
 result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)

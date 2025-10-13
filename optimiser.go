@@ -67,10 +67,10 @@ SolverResult call_optimise_placement_with_handle(
     const double* improvement_threshold,
     const _Bool* score_only,
     const int* max_attempts,
-    const _Bool* use_greedy_hint,
-    const int* greedy_hint_attempt,
-    const _Bool* fallback_to_greedy,
-    const _Bool* greedy_only
+    const _Bool* use_beam_search_hint,
+    const int* beam_search_hint_attempt,
+    const _Bool* fallback_to_beam_search,
+    const _Bool* beam_search_only
 ) {
     // Get the function pointer using dlsym with the specific handle
     void* sym = dlsym(lib_handle, "OptimisePlacement");
@@ -108,8 +108,8 @@ SolverResult call_optimise_placement_with_handle(
     return func(mds, num_mds, pods, num_pods, plugin_scores,
                 allowed_matrix, initial_assignment, out_slot_assignments,
                 out_slots_used, max_runtime_secs, improvement_threshold, score_only,
-                max_attempts, use_greedy_hint, greedy_hint_attempt,
-                fallback_to_greedy, greedy_only);
+                max_attempts, use_beam_search_hint, beam_search_hint_attempt,
+                fallback_to_beam_search, beam_search_only);
 }
 
 // C wrapper function for beam search optimization
@@ -208,28 +208,28 @@ type OptimizationConfig struct {
 	// Retry controls
 	MaxAttempts *int // Number of CP-SAT attempts (default: 1)
 
-	// Greedy heuristic controls
-	UseGreedyHint      *bool // Use greedy as hint for CP-SAT attempt N (default: false)
-	GreedyHintAttempt  *int  // Which attempt to inject greedy hint (default: 2)
-	FallbackToGreedy   *bool // Use pure greedy if all CP-SAT attempts fail (default: false)
-	GreedyOnly         *bool // Skip CP-SAT entirely, only run greedy (default: false)
+	// Beam search heuristic controls (beam search replaced the old greedy algorithm)
+	UseBeamSearchHint     *bool // Use beam search as hint for CP-SAT attempt N (default: false)
+	BeamSearchHintAttempt *int  // Which attempt to inject beam search hint (default: 2)
+	FallbackToBeamSearch  *bool // Use pure beam search if all CP-SAT attempts fail (default: false)
+	BeamSearchOnly        *bool // Skip CP-SAT entirely, only run beam search (default: false)
 }
 
 type Result struct {
-	PodAssignments   []PodSlotAssignment
-	SlotsUsed        [][]bool
-	Succeeded        bool
-	Objective        float64
-	SolverStatus     int
-	SolveTimeSecs    float64
-	Message          string
-	CurrentStateCost    float64 // Cost of the current state before optimization
-	AlreadyOptimal      bool    // True if improvement doesn't meet threshold
-	UsedBeamSearch      bool    // True if beam search algorithm was used (hint or fallback)
-	BeamSearchFallback  bool    // True if pure beam search fallback was used (not just hint)
-	CPSATAttempts       int     // Number of CP-SAT attempts made
-	BestAttempt         int     // Which attempt produced the result (0 = beam-search-only)
-	UnplacedPods        int     // Number of pods that couldn't be placed (beam search only)
+	PodAssignments     []PodSlotAssignment
+	SlotsUsed          [][]bool
+	Succeeded          bool
+	Objective          float64
+	SolverStatus       int
+	SolveTimeSecs      float64
+	Message            string
+	CurrentStateCost   float64 // Cost of the current state before optimization
+	AlreadyOptimal     bool    // True if improvement doesn't meet threshold
+	UsedBeamSearch     bool    // True if beam search algorithm was used (hint or fallback)
+	BeamSearchFallback bool    // True if pure beam search fallback was used (not just hint)
+	CPSATAttempts      int     // Number of CP-SAT attempts made
+	BestAttempt        int     // Which attempt produced the result (0 = beam-search-only)
+	UnplacedPods       int     // Number of pods that couldn't be placed (beam search only)
 }
 
 func makeCIntSlice(data []int) *C.int {
@@ -444,18 +444,18 @@ func parseResults(
 	outSlotsUsedCount int,
 ) Result {
 	result := Result{
-		Succeeded:        bool(res.success),
-		Objective:        float64(res.objective),
-		SolverStatus:     int(res.status_code),
-		SolveTimeSecs:    float64(res.solve_time_secs),
-		Message:          "",
-		CurrentStateCost: float64(res.current_state_cost),
-		AlreadyOptimal:   bool(res.already_optimal),
+		Succeeded:          bool(res.success),
+		Objective:          float64(res.objective),
+		SolverStatus:       int(res.status_code),
+		SolveTimeSecs:      float64(res.solve_time_secs),
+		Message:            "",
+		CurrentStateCost:   float64(res.current_state_cost),
+		AlreadyOptimal:     bool(res.already_optimal),
 		UsedBeamSearch:     bool(res.used_beam_search),
 		BeamSearchFallback: bool(res.beam_search_fallback),
-		CPSATAttempts:    int(res.cpsat_attempts),
-		BestAttempt:      int(res.best_attempt),
-		UnplacedPods:     int(res.unplaced_pods),
+		CPSATAttempts:      int(res.cpsat_attempts),
+		BestAttempt:        int(res.best_attempt),
+		UnplacedPods:       int(res.unplaced_pods),
 	}
 
 	// In score-only mode, assignments will be empty (-1 values)
@@ -525,20 +525,20 @@ func OptimisePlacementRaw(
 	var improvementThreshold *float64
 	var scoreOnly *bool
 	var maxAttempts *int
-	var useGreedyHint *bool
-	var greedyHintAttempt *int
-	var fallbackToGreedy *bool
-	var greedyOnly *bool
+	var useBeamSearchHint *bool
+	var beamSearchHintAttempt *int
+	var fallbackToBeamSearch *bool
+	var beamSearchOnly *bool
 
 	if config != nil {
 		maxRuntimeSeconds = config.MaxRuntimeSeconds
 		improvementThreshold = config.ImprovementThreshold
 		scoreOnly = config.ScoreOnly
 		maxAttempts = config.MaxAttempts
-		useGreedyHint = config.UseGreedyHint
-		greedyHintAttempt = config.GreedyHintAttempt
-		fallbackToGreedy = config.FallbackToGreedy
-		greedyOnly = config.GreedyOnly
+		useBeamSearchHint = config.UseBeamSearchHint
+		beamSearchHintAttempt = config.BeamSearchHintAttempt
+		fallbackToBeamSearch = config.FallbackToBeamSearch
+		beamSearchOnly = config.BeamSearchOnly
 	}
 
 	numMDs := len(mds)
@@ -588,32 +588,32 @@ func OptimisePlacementRaw(
 		defer C.free(unsafe.Pointer(cMaxAttempts))
 	}
 
-	var cUseGreedyHint *C._Bool
-	if useGreedyHint != nil {
-		cUseGreedyHint = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
-		*cUseGreedyHint = C._Bool(*useGreedyHint)
-		defer C.free(unsafe.Pointer(cUseGreedyHint))
+	var cUseBeamSearchHint *C._Bool
+	if useBeamSearchHint != nil {
+		cUseBeamSearchHint = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
+		*cUseBeamSearchHint = C._Bool(*useBeamSearchHint)
+		defer C.free(unsafe.Pointer(cUseBeamSearchHint))
 	}
 
-	var cGreedyHintAttempt *C.int
-	if greedyHintAttempt != nil {
-		cGreedyHintAttempt = (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
-		*cGreedyHintAttempt = C.int(*greedyHintAttempt)
-		defer C.free(unsafe.Pointer(cGreedyHintAttempt))
+	var cBeamSearchHintAttempt *C.int
+	if beamSearchHintAttempt != nil {
+		cBeamSearchHintAttempt = (*C.int)(C.malloc(C.size_t(unsafe.Sizeof(C.int(0)))))
+		*cBeamSearchHintAttempt = C.int(*beamSearchHintAttempt)
+		defer C.free(unsafe.Pointer(cBeamSearchHintAttempt))
 	}
 
-	var cFallbackToGreedy *C._Bool
-	if fallbackToGreedy != nil {
-		cFallbackToGreedy = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
-		*cFallbackToGreedy = C._Bool(*fallbackToGreedy)
-		defer C.free(unsafe.Pointer(cFallbackToGreedy))
+	var cFallbackToBeamSearch *C._Bool
+	if fallbackToBeamSearch != nil {
+		cFallbackToBeamSearch = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
+		*cFallbackToBeamSearch = C._Bool(*fallbackToBeamSearch)
+		defer C.free(unsafe.Pointer(cFallbackToBeamSearch))
 	}
 
-	var cGreedyOnly *C._Bool
-	if greedyOnly != nil {
-		cGreedyOnly = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
-		*cGreedyOnly = C._Bool(*greedyOnly)
-		defer C.free(unsafe.Pointer(cGreedyOnly))
+	var cBeamSearchOnly *C._Bool
+	if beamSearchOnly != nil {
+		cBeamSearchOnly = (*C._Bool)(C.malloc(C.size_t(unsafe.Sizeof(C._Bool(false)))))
+		*cBeamSearchOnly = C._Bool(*beamSearchOnly)
+		defer C.free(unsafe.Pointer(cBeamSearchOnly))
 	}
 
 	res := C.call_optimise_placement_with_handle(
@@ -622,8 +622,8 @@ func OptimisePlacementRaw(
 		(*C.Pod)(unsafe.Pointer(&cPods[0])), C.int(numPods),
 		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
 		cImprovementThreshold, cScoreOnly,
-		cMaxAttempts, cUseGreedyHint, cGreedyHintAttempt,
-		cFallbackToGreedy, cGreedyOnly,
+		cMaxAttempts, cUseBeamSearchHint, cBeamSearchHintAttempt,
+		cFallbackToBeamSearch, cBeamSearchOnly,
 	)
 
 	return parseResults(res, outAssign, outSlots, numPods, slotsPerMD, outSlotsUsedCount)
@@ -751,10 +751,8 @@ func OptimisePlacementBeamSearch(
 	// Call the C beam search function
 	var cResult C.SolverResult
 	libHandle := GetLibHandle()
-	fmt.Printf("DEBUG: libHandle=%v\n", libHandle)
 
 	if libHandle != nil {
-		fmt.Printf("DEBUG: Calling beam search C function...\n")
 		cResult = C.call_optimise_placement_beam_search(
 			libHandle,
 			(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(len(mds)),
@@ -766,10 +764,7 @@ func OptimisePlacementBeamSearch(
 			cBeamWidth,
 			cMDCandidates,
 		)
-		fmt.Printf("DEBUG: C function returned\n")
 	} else {
-		// Fallback error
-		fmt.Printf("DEBUG: Library not loaded!\n")
 		return Result{
 			Succeeded: false,
 			Message:   "library not loaded",
@@ -783,16 +778,13 @@ func OptimisePlacementBeamSearch(
 	solveTime := float64(cResult.solve_time_secs)
 	unplacedPods := int(cResult.unplaced_pods)
 
-	// DEBUG
-	fmt.Printf("DEBUG Go: cResult.success=%v, objective=%.2f, unplaced=%d\n", cResult.success, objective, unplacedPods)
-
 	result := Result{
-		Succeeded:     succeeded,
-		Objective:     objective,
-		SolverStatus:  status,
-		SolveTimeSecs: solveTime,
+		Succeeded:      succeeded,
+		Objective:      objective,
+		SolverStatus:   status,
+		SolveTimeSecs:  solveTime,
 		UsedBeamSearch: true, // Beam search is the heuristic
-		UnplacedPods:  unplacedPods,
+		UnplacedPods:   unplacedPods,
 	}
 
 	if succeeded {
@@ -804,7 +796,7 @@ func OptimisePlacementBeamSearch(
 
 	// Parse assignments (format: [MD, Slot, MD, Slot, ...])
 	assignments := make([]PodSlotAssignment, len(pods))
-	goAssignments := (*[1 << 30]C.int)(unsafe.Pointer(cOutAssignments))[:len(pods)*2:len(pods)*2]
+	goAssignments := (*[1 << 30]C.int)(unsafe.Pointer(cOutAssignments))[: len(pods)*2 : len(pods)*2]
 	for i := range pods {
 		assignments[i] = PodSlotAssignment{
 			MD:   int(goAssignments[i*2]),

@@ -262,7 +262,11 @@ func computeAllowedMatrix(pods []optimiser.Pod, mds []optimiser.MachineDeploymen
 // computeInitialAssignments generates a greedy seed assignment based on plugin scores.
 // Used to warm-start the SAT solver and speed up convergence.
 // calculateWaste calculates CPU and memory waste for a given result
-func calculateWaste(result optimiser.Result, mds []optimiser.MachineDeployment, pods []optimiser.Pod) (float64, float64, int) {
+func calculateWaste(
+	result optimiser.Result,
+	mds []optimiser.MachineDeployment,
+	pods []optimiser.Pod,
+) (float64, float64, int) {
 	if !result.Succeeded {
 		return 0, 0, 0
 	}
@@ -361,24 +365,14 @@ func computeInitialAssignments(
 	return initial
 }
 
-// main executes the full optimisation flow with example data.
-// This includes plugin-based scoring, constraint generation, warm start, and final solver execution.
-func main() {
-	mds := generateMDs()
-	pods := generatePods()
-
-	plugins := []ScoringPlugin{
-		&FewestNodesPlugin{weight: 0.2},
-		&RegexMatchPlugin{weight: 0.1, pattern: regexp.MustCompile(`.*-c7i$`)},
-	}
-
-	stats := calculatePodStats(pods)
-	scores := computeScores(mds, stats, plugins)
-
-	allowedMatrix, _ := computeAllowedMatrix(pods, mds)
-	initial := computeInitialAssignments(pods, mds, scores)
-
-	// First, get the current state score using score-only mode
+// evaluateCurrentState runs score-only mode to evaluate the current state
+func evaluateCurrentState(
+	mds []optimiser.MachineDeployment,
+	pods []optimiser.Pod,
+	scores []float64,
+	allowedMatrix []int,
+	initial [][][]int,
+) {
 	fmt.Println("\n=== Score-Only Mode: Evaluating Current State ===")
 	scoreStart := time.Now()
 	scoreConfig := &optimiser.OptimizationConfig{
@@ -393,136 +387,178 @@ func main() {
 	} else {
 		fmt.Printf("Score-only mode failed: %s\n", scoreResult.Message)
 	}
+}
 
-	// Compare three optimization strategies
-	fmt.Println("\n" + strings.Repeat("=", 80))
-	fmt.Println("=== COMPARISON: Greedy vs CP-SAT vs Greedy Warm-Start ===")
-	fmt.Println(strings.Repeat("=", 80))
+// strategyResults holds results from all optimization strategies
+type strategyResults struct {
+	beamSearchOnly         optimiser.Result
+	beamSearchOnlyDuration time.Duration
+	beam                   optimiser.Result
+	beamDuration           time.Duration
+	cpsat                  optimiser.Result
+	cpsatDuration          time.Duration
+	hybrid                 optimiser.Result
+	hybridDuration         time.Duration
+}
 
-	// Strategy 1: Greedy-Only (Fast Heuristic)
-	fmt.Println("\n[1] Greedy-Only Mode (Fast Heuristic)")
+// runAllStrategies executes all optimization strategies and returns their results
+func runAllStrategies(
+	mds []optimiser.MachineDeployment,
+	pods []optimiser.Pod,
+	scores []float64,
+	allowedMatrix []int,
+) strategyResults {
+	var results strategyResults
+
+	// Strategy 1: Beam-Search-Only
+	fmt.Println("\n[1] Beam-Search-Only Mode (Fast Heuristic)")
 	fmt.Println(strings.Repeat("-", 80))
-	greedyStart := time.Now()
-	greedyConfig := &optimiser.OptimizationConfig{
-		GreedyOnly: optimiser.BoolPtr(true),
+	start := time.Now()
+	config := &optimiser.OptimizationConfig{
+		BeamSearchOnly: optimiser.BoolPtr(true),
 	}
-	greedyResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, greedyConfig)
-	greedyDuration := time.Since(greedyStart)
+	results.beamSearchOnly = optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, config)
+	results.beamSearchOnlyDuration = time.Since(start)
+	printBeamSearchOnlyResult(results.beamSearchOnly, results.beamSearchOnlyDuration, mds, pods)
 
-	var greedyNodes int
-	if greedyResult.Succeeded {
-		// Calculate waste for greedy result
-		greedyWasteCPU, greedyWasteMem, greedyNodes := calculateWaste(greedyResult, mds, pods)
-
-		fmt.Printf("✓ Success\n")
-		fmt.Printf("  Objective:      %.2f\n", greedyResult.Objective)
-		fmt.Printf("  Time:           %s\n", greedyDuration)
-		fmt.Printf("  Used Beam Search: %v\n", greedyResult.UsedBeamSearch)
-		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
-		fmt.Printf("  Nodes Used:     %d\n", greedyNodes)
-		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", greedyWasteCPU, greedyWasteMem)
-	} else {
-		fmt.Printf("✗ Failed: %s\n", greedyResult.Message)
-		fmt.Printf("  Unplaced Pods:  %d\n", greedyResult.UnplacedPods)
-	}
-
-	// Strategy 1b: Beam Search (Enhanced Greedy with Backtracking)
-	fmt.Println("\n[1b] Beam Search Mode (Greedy + Limited Backtracking)")
+	// Strategy 1b: Beam Search Enhanced
+	fmt.Println("\n[1b] Beam Search Mode (Enhanced + Limited Backtracking)")
 	fmt.Println(strings.Repeat("-", 80))
-	beamStart := time.Now()
+	start = time.Now()
 	beamConfig := &optimiser.BeamSearchConfig{
 		BeamWidth:    optimiser.IntPtr(3),
 		MDCandidates: optimiser.IntPtr(3),
 	}
-	beamResult := optimiser.OptimisePlacementBeamSearch(mds, pods, scores, allowedMatrix, beamConfig)
-	beamDuration := time.Since(beamStart)
+	results.beam = optimiser.OptimisePlacementBeamSearch(mds, pods, scores, allowedMatrix, beamConfig)
+	results.beamDuration = time.Since(start)
+	printBeamResult(results.beam, results.beamDuration, results.beamSearchOnly, results.beamSearchOnlyDuration, mds, pods)
 
-	if beamResult.Succeeded {
-		// Calculate waste for beam search result
-		beamWasteCPU, beamWasteMem, beamNodes := calculateWaste(beamResult, mds, pods)
-
-		fmt.Printf("✓ Success\n")
-		fmt.Printf("  Objective:      %.2f\n", beamResult.Objective)
-		fmt.Printf("  Time:           %s\n", beamDuration)
-		fmt.Printf("  Beam Width:     3\n")
-		fmt.Printf("  MD Candidates:  5\n")
-		fmt.Printf("  Nodes Used:     %d\n", beamNodes)
-		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", beamWasteCPU, beamWasteMem)
-
-		if greedyResult.Succeeded {
-			improvement := ((greedyResult.Objective - beamResult.Objective) / greedyResult.Objective) * 100.0
-			speedRatio := float64(beamDuration.Microseconds()) / float64(greedyDuration.Microseconds())
-			fmt.Printf("  vs Greedy:      %.2fx slower, %.1f%% better objective\n", speedRatio, improvement)
-			if beamNodes != greedyNodes {
-				nodeReduction := float64(greedyNodes-beamNodes) / float64(greedyNodes) * 100.0
-				fmt.Printf("  Node Reduction: %d → %d (%.1f%% fewer)\n", greedyNodes, beamNodes, nodeReduction)
-			}
-		}
-	} else {
-		fmt.Printf("✗ Failed: %s\n", beamResult.Message)
-		fmt.Printf("  Unplaced Pods:  %d\n", beamResult.UnplacedPods)
-	}
-
-	// Strategy 2: CP-SAT Only (Optimal but Slower)
+	// Strategy 2: CP-SAT Only
 	fmt.Println("\n[2] CP-SAT Only Mode (Optimal Search)")
 	fmt.Println(strings.Repeat("-", 80))
-	cpsatStart := time.Now()
+	start = time.Now()
 	cpsatConfig := &optimiser.OptimizationConfig{
 		MaxRuntimeSeconds: optimiser.IntPtr(30),
 		MaxAttempts:       optimiser.IntPtr(1),
 	}
-	cpsatResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, cpsatConfig)
-	cpsatDuration := time.Since(cpsatStart)
+	results.cpsat = optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, cpsatConfig)
+	results.cpsatDuration = time.Since(start)
+	printCPSATResult(results.cpsat, results.cpsatDuration, mds, pods)
 
-	if cpsatResult.Succeeded {
-		// Calculate waste for CP-SAT result
-		cpsatWasteCPU, cpsatWasteMem, cpsatNodes := calculateWaste(cpsatResult, mds, pods)
-
-		fmt.Printf("✓ Success\n")
-		fmt.Printf("  Objective:      %.2f\n", cpsatResult.Objective)
-		fmt.Printf("  Time:           %s\n", cpsatDuration)
-		fmt.Printf("  Solve Time:     %.2fs\n", cpsatResult.SolveTimeSecs)
-		fmt.Printf("  Status Code:    %d\n", cpsatResult.SolverStatus)
-		fmt.Printf("  CP-SAT Attempts: %d\n", cpsatResult.CPSATAttempts)
-		fmt.Printf("  Nodes Used:     %d\n", cpsatNodes)
-		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", cpsatWasteCPU, cpsatWasteMem)
-	} else {
-		fmt.Printf("✗ Failed: %s\n", cpsatResult.Message)
-	}
-
-	// Strategy 3: Greedy Warm-Start (Best of Both)
+	// Strategy 3: Hybrid
 	fmt.Println("\n[3] CP-SAT with Greedy Warm-Start (Hybrid)")
 	fmt.Println(strings.Repeat("-", 80))
-	hybridStart := time.Now()
+	start = time.Now()
 	hybridConfig := &optimiser.OptimizationConfig{
-		MaxRuntimeSeconds: optimiser.IntPtr(30),
-		MaxAttempts:       optimiser.IntPtr(3),
-		UseGreedyHint:     optimiser.BoolPtr(true),
-		GreedyHintAttempt: optimiser.IntPtr(2),
-		FallbackToGreedy:  optimiser.BoolPtr(true),
+		MaxRuntimeSeconds:     optimiser.IntPtr(30),
+		MaxAttempts:           optimiser.IntPtr(3),
+		UseBeamSearchHint:     optimiser.BoolPtr(true),
+		BeamSearchHintAttempt: optimiser.IntPtr(2),
+		FallbackToBeamSearch:  optimiser.BoolPtr(true),
 	}
-	hybridResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, hybridConfig)
-	hybridDuration := time.Since(hybridStart)
+	results.hybrid = optimiser.OptimisePlacementRaw(mds, pods, scores, allowedMatrix, nil, hybridConfig)
+	results.hybridDuration = time.Since(start)
+	printHybridResult(results.hybrid, results.hybridDuration, mds, pods)
 
-	if hybridResult.Succeeded {
-		// Calculate waste for hybrid result
-		hybridWasteCPU, hybridWasteMem, hybridNodes := calculateWaste(hybridResult, mds, pods)
+	return results
+}
 
+func printBeamSearchOnlyResult(
+	result optimiser.Result,
+	duration time.Duration,
+	mds []optimiser.MachineDeployment,
+	pods []optimiser.Pod,
+) {
+	if result.Succeeded {
+		wasteCPU, wasteMem, nodes := calculateWaste(result, mds, pods)
 		fmt.Printf("✓ Success\n")
-		fmt.Printf("  Objective:      %.2f\n", hybridResult.Objective)
-		fmt.Printf("  Time:           %s\n", hybridDuration)
-		fmt.Printf("  Solve Time:     %.2fs\n", hybridResult.SolveTimeSecs)
-		fmt.Printf("  Used Beam Search: %v\n", hybridResult.UsedBeamSearch)
-		fmt.Printf("  Beam Fallback:  %v\n", hybridResult.BeamSearchFallback)
-		fmt.Printf("  CP-SAT Attempts: %d\n", hybridResult.CPSATAttempts)
-		fmt.Printf("  Best Attempt:   %d\n", hybridResult.BestAttempt)
-		fmt.Printf("  Nodes Used:     %d\n", hybridNodes)
-		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", hybridWasteCPU, hybridWasteMem)
+		fmt.Printf("  Objective:      %.2f\n", result.Objective)
+		fmt.Printf("  Time:           %s\n", duration)
+		fmt.Printf("  Used Beam Search: %v\n", result.UsedBeamSearch)
+		fmt.Printf("  Unplaced Pods:  %d\n", result.UnplacedPods)
+		fmt.Printf("  Nodes Used:     %d\n", nodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", wasteCPU, wasteMem)
 	} else {
-		fmt.Printf("✗ Failed: %s\n", hybridResult.Message)
+		fmt.Printf("✗ Failed: %s\n", result.Message)
+		fmt.Printf("  Unplaced Pods:  %d\n", result.UnplacedPods)
 	}
+}
 
-	// Summary comparison
+func printBeamResult(
+	result optimiser.Result,
+	duration time.Duration,
+	baselineResult optimiser.Result,
+	baselineDuration time.Duration,
+	mds []optimiser.MachineDeployment,
+	pods []optimiser.Pod,
+) {
+	if result.Succeeded {
+		wasteCPU, wasteMem, nodes := calculateWaste(result, mds, pods)
+		fmt.Printf("✓ Success\n")
+		fmt.Printf("  Objective:      %.2f\n", result.Objective)
+		fmt.Printf("  Time:           %s\n", duration)
+		fmt.Printf("  Beam Width:     3\n")
+		fmt.Printf("  MD Candidates:  3\n")
+		fmt.Printf("  Nodes Used:     %d\n", nodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", wasteCPU, wasteMem)
+
+		if baselineResult.Succeeded {
+			improvement := ((baselineResult.Objective - result.Objective) / baselineResult.Objective) * 100.0
+			speedRatio := float64(duration.Microseconds()) / float64(baselineDuration.Microseconds())
+			fmt.Printf("  vs Beam-Only:   %.2fx slower, %.1f%% better objective\n", speedRatio, improvement)
+		}
+	} else {
+		fmt.Printf("✗ Failed: %s\n", result.Message)
+		fmt.Printf("  Unplaced Pods:  %d\n", result.UnplacedPods)
+	}
+}
+
+func printCPSATResult(
+	result optimiser.Result,
+	duration time.Duration,
+	mds []optimiser.MachineDeployment,
+	pods []optimiser.Pod,
+) {
+	if result.Succeeded {
+		wasteCPU, wasteMem, nodes := calculateWaste(result, mds, pods)
+		fmt.Printf("✓ Success\n")
+		fmt.Printf("  Objective:      %.2f\n", result.Objective)
+		fmt.Printf("  Time:           %s\n", duration)
+		fmt.Printf("  Solve Time:     %.2fs\n", result.SolveTimeSecs)
+		fmt.Printf("  Status Code:    %d\n", result.SolverStatus)
+		fmt.Printf("  CP-SAT Attempts: %d\n", result.CPSATAttempts)
+		fmt.Printf("  Nodes Used:     %d\n", nodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", wasteCPU, wasteMem)
+	} else {
+		fmt.Printf("✗ Failed: %s\n", result.Message)
+	}
+}
+
+func printHybridResult(
+	result optimiser.Result,
+	duration time.Duration,
+	mds []optimiser.MachineDeployment,
+	pods []optimiser.Pod,
+) {
+	if result.Succeeded {
+		wasteCPU, wasteMem, nodes := calculateWaste(result, mds, pods)
+		fmt.Printf("✓ Success\n")
+		fmt.Printf("  Objective:      %.2f\n", result.Objective)
+		fmt.Printf("  Time:           %s\n", duration)
+		fmt.Printf("  Solve Time:     %.2fs\n", result.SolveTimeSecs)
+		fmt.Printf("  Used Beam Search: %v\n", result.UsedBeamSearch)
+		fmt.Printf("  Beam Fallback:  %v\n", result.BeamSearchFallback)
+		fmt.Printf("  CP-SAT Attempts: %d\n", result.CPSATAttempts)
+		fmt.Printf("  Best Attempt:   %d\n", result.BestAttempt)
+		fmt.Printf("  Nodes Used:     %d\n", nodes)
+		fmt.Printf("  Waste:          %.2f CPU, %.2f GiB Memory\n", wasteCPU, wasteMem)
+	} else {
+		fmt.Printf("✗ Failed: %s\n", result.Message)
+	}
+}
+
+// printSummary prints a summary comparison table of all strategies
+func printSummary(results strategyResults) {
 	fmt.Println("\n" + strings.Repeat("=", 80))
 	fmt.Println("=== SUMMARY ===")
 	fmt.Println(strings.Repeat("=", 80))
@@ -530,85 +566,66 @@ func main() {
 	fmt.Printf("%-25s | %-12s | %-15s | %-10s\n", "Strategy", "Objective", "Time", "Success")
 	fmt.Println(strings.Repeat("-", 80))
 
-	if greedyResult.Succeeded {
-		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
-			"Greedy-Only", greedyResult.Objective, greedyDuration, "✓")
+	printSummaryRow("Beam-Search-Only", results.beamSearchOnly, results.beamSearchOnlyDuration)
+	printSummaryRow("Beam Search Enhanced", results.beam, results.beamDuration)
+	printSummaryRow("CP-SAT Only", results.cpsat, results.cpsatDuration)
+	printSummaryRow("Hybrid (Greedy + CP-SAT)", results.hybrid, results.hybridDuration)
+}
+
+func printSummaryRow(name string, result optimiser.Result, duration time.Duration) {
+	if result.Succeeded {
+		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n", name, result.Objective, duration, "✓")
 	} else {
-		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
-			"Greedy-Only", "N/A", greedyDuration, "✗")
+		fmt.Printf("%-25s | %12s | %15s | %-10s\n", name, "N/A", duration, "✗")
+	}
+}
+
+// selectBestStrategy returns the best result and its name based on lowest objective
+func selectBestStrategy(results strategyResults) (optimiser.Result, string) {
+	candidates := []struct {
+		result optimiser.Result
+		name   string
+	}{
+		{results.beamSearchOnly, "Beam-Search-Only"},
+		{results.beam, "Beam Search Enhanced"},
+		{results.cpsat, "CP-SAT Only"},
+		{results.hybrid, "Hybrid"},
 	}
 
-	if beamResult.Succeeded {
-		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
-			"Beam Search", beamResult.Objective, beamDuration, "✓")
-	} else {
-		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
-			"Beam Search", "N/A", beamDuration, "✗")
-	}
-
-	if cpsatResult.Succeeded {
-		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
-			"CP-SAT Only", cpsatResult.Objective, cpsatDuration, "✓")
-	} else {
-		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
-			"CP-SAT Only", "N/A", cpsatDuration, "✗")
-	}
-
-	if hybridResult.Succeeded {
-		fmt.Printf("%-25s | %12.2f | %15s | %-10s\n",
-			"Hybrid (Greedy + CP-SAT)", hybridResult.Objective, hybridDuration, "✓")
-	} else {
-		fmt.Printf("%-25s | %12s | %15s | %-10s\n",
-			"Hybrid (Greedy + CP-SAT)", "N/A", hybridDuration, "✗")
-	}
-
-	// Determine which strategy to use for detailed output
-	var result optimiser.Result
-	var strategyName string
-
-	// Prefer the best objective value among successful strategies
 	bestObjective := float64(1e100)
-	if greedyResult.Succeeded && greedyResult.Objective < bestObjective {
-		result = greedyResult
-		strategyName = "Greedy-Only"
-		bestObjective = greedyResult.Objective
-	}
-	if beamResult.Succeeded && beamResult.Objective < bestObjective {
-		result = beamResult
-		strategyName = "Beam Search"
-		bestObjective = beamResult.Objective
-	}
-	if cpsatResult.Succeeded && cpsatResult.Objective < bestObjective {
-		result = cpsatResult
-		strategyName = "CP-SAT Only"
-		bestObjective = cpsatResult.Objective
-	}
-	if hybridResult.Succeeded && hybridResult.Objective < bestObjective {
-		result = hybridResult
-		strategyName = "Hybrid"
-		bestObjective = hybridResult.Objective
+	var bestResult optimiser.Result
+	var bestName string
+
+	for _, c := range candidates {
+		if c.result.Succeeded && c.result.Objective < bestObjective {
+			bestResult = c.result
+			bestName = c.name
+			bestObjective = c.result.Objective
+		}
 	}
 
-	if bestObjective == float64(1e100) {
+	return bestResult, bestName
+}
+
+// printDetailedResults prints detailed information about the best strategy
+func printDetailedResults(results strategyResults, mds []optimiser.MachineDeployment, pods []optimiser.Pod) {
+	result, strategyName := selectBestStrategy(results)
+	if strategyName == "" {
 		fmt.Println("\n✗ No strategy produced a valid solution.")
 		return
 	}
 
-	fmt.Printf("\n✓ Best strategy: %s (Objective: %.2f)\n", strategyName, bestObjective)
+	fmt.Printf("\n✓ Best strategy: %s (Objective: %.2f)\n", strategyName, result.Objective)
 	fmt.Println("\n" + strings.Repeat("=", 80))
 	fmt.Printf("=== DETAILED RESULTS: %s ===\n", strategyName)
 	fmt.Println(strings.Repeat("=", 80))
 
 	totalNodes := 0
 	for _, slots := range result.SlotsUsed {
-		replicas := 0
 		for _, used := range slots {
 			if used {
-				replicas++
+				totalNodes++
 			}
-		}
-		if replicas > 0 {
-			totalNodes += replicas
 		}
 	}
 
@@ -625,7 +642,6 @@ func main() {
 		}
 	}
 
-	// Report total resource waste for post-analysis or plugin tuning
 	var totalWasteCPU, totalWasteMem float64
 	mdCPUUsed := make([]float64, len(mds))
 	mdMemUsed := make([]float64, len(mds))
@@ -648,12 +664,8 @@ func main() {
 		}
 		provisionedCPU := float64(replicas) * mds[i].GetCPU()
 		provisionedMem := float64(replicas) * mds[i].GetMemory()
-
-		wasteCPU := provisionedCPU - mdCPUUsed[i]
-		wasteMem := provisionedMem - mdMemUsed[i]
-
-		totalWasteCPU += wasteCPU
-		totalWasteMem += wasteMem
+		totalWasteCPU += provisionedCPU - mdCPUUsed[i]
+		totalWasteMem += provisionedMem - mdMemUsed[i]
 	}
 
 	fmt.Println("\nPod Assignments:")
@@ -665,4 +677,33 @@ func main() {
 	}
 
 	fmt.Printf("\nTotal Waste:\n  CPU:    %.2f cores\n  Memory: %.2f GiB\n", totalWasteCPU, totalWasteMem)
+}
+
+// main executes the full optimisation flow with example data.
+// This includes plugin-based scoring, constraint generation, warm start, and final solver execution.
+func main() {
+	mds := generateMDs()
+	pods := generatePods()
+
+	plugins := []ScoringPlugin{
+		&FewestNodesPlugin{weight: 0.2},
+		&RegexMatchPlugin{weight: 0.1, pattern: regexp.MustCompile(`.*-c7i$`)},
+	}
+
+	stats := calculatePodStats(pods)
+	scores := computeScores(mds, stats, plugins)
+
+	allowedMatrix, _ := computeAllowedMatrix(pods, mds)
+	initial := computeInitialAssignments(pods, mds, scores)
+
+	evaluateCurrentState(mds, pods, scores, allowedMatrix, initial)
+
+	// Compare optimization strategies
+	fmt.Println("\n" + strings.Repeat("=", 80))
+	fmt.Println("=== COMPARISON: Greedy vs CP-SAT vs Greedy Warm-Start ===")
+	fmt.Println(strings.Repeat("=", 80))
+
+	results := runAllStrategies(mds, pods, scores, allowedMatrix)
+	printSummary(results)
+	printDetailedResults(results, mds, pods)
 }

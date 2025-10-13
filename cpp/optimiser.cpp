@@ -1573,10 +1573,10 @@ SolverResult OptimisePlacement(
     const double* improvement_threshold,
     const bool* score_only,
     const int* max_attempts,
-    const bool* use_greedy_hint,
-    const int* greedy_hint_attempt,
-    const bool* fallback_to_greedy,
-    const bool* greedy_only
+    const bool* use_beam_search_hint,
+    const int* beam_search_hint_attempt,
+    const bool* fallback_to_beam_search,
+    const bool* beam_search_only
 ) {
     // Initialize result
     SolverResult result = {false, 0.0, 0, 0.0, 0.0, false, false, false, 0, 0, 0};
@@ -1584,10 +1584,10 @@ SolverResult OptimisePlacement(
     // Parse configuration with defaults
     int num_attempts = (max_attempts != nullptr) ? *max_attempts : 1;
     int timeout = (max_runtime_secs != nullptr) ? *max_runtime_secs : 15;
-    bool do_greedy_hint = (use_greedy_hint != nullptr) ? *use_greedy_hint : false;
-    int greedy_hint_at = (greedy_hint_attempt != nullptr) ? *greedy_hint_attempt : 2;
-    bool do_fallback = (fallback_to_greedy != nullptr) ? *fallback_to_greedy : false;
-    bool only_greedy = (greedy_only != nullptr) ? *greedy_only : false;
+    bool do_beam_search_hint = (use_beam_search_hint != nullptr) ? *use_beam_search_hint : false;
+    int beam_search_hint_at = (beam_search_hint_attempt != nullptr) ? *beam_search_hint_attempt : 2;
+    bool do_fallback = (fallback_to_beam_search != nullptr) ? *fallback_to_beam_search : false;
+    bool only_beam_search = (beam_search_only != nullptr) ? *beam_search_only : false;
     double threshold = (improvement_threshold != nullptr) ? *improvement_threshold : 0.0;
 
     // Calculate current state cost
@@ -1624,7 +1624,7 @@ SolverResult OptimisePlacement(
     }
 
     // Beam-search-only mode
-    if (only_greedy) {
+    if (only_beam_search) {
         BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
                                                plugin_scores, allowed_matrix,
                                                3, 3);  // beam_width=3, md_candidates=3
@@ -1704,7 +1704,7 @@ SolverResult OptimisePlacement(
         if (initial_assignment != nullptr) {
             // User-provided hint always takes precedence
             hint_to_use = initial_assignment;
-        } else if (do_greedy_hint && attempt == greedy_hint_at && !beam_hint_generated) {
+        } else if (do_beam_search_hint && attempt == beam_search_hint_at && !beam_hint_generated) {
             // Generate beam search hint on specified attempt
             BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
                                                    plugin_scores, allowed_matrix,
@@ -1714,7 +1714,6 @@ SolverResult OptimisePlacement(
                 hint_to_use = beam_hint_matrix.data();
                 beam_hint_generated = true;
                 result.used_beam_search = true;
-                std::cerr << "Using beam search hint for attempt " << attempt << std::endl;
             }
         }
 
@@ -1874,11 +1873,6 @@ SolverResult OptimisePlacementBeamSearch(
     const int* beam_width,        // Beam width (default: 3)
     const int* md_candidates      // MD candidates per pod (default: 5)
 ) {
-    {
-        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
-        debug << ">>> OptimisePlacementBeamSearch ENTERED: " << num_pods << " pods, " << num_mds << " MDs" << std::endl;
-    }
-
     SolverResult result = {false, 0.0, 0, 0.0, 0.0, false, false, false, 0, 0, 0};
 
     // Parse parameters with defaults
@@ -1901,25 +1895,13 @@ SolverResult OptimisePlacementBeamSearch(
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
 
-    {
-        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
-        debug << ">>> all_placed=" << beam_result.all_placed << ", unplaced_count=" << beam_result.unplaced_count << std::endl;
-    }
-
     // Check if all pods placed
     if (!beam_result.all_placed) {
-        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
-        debug << ">>> EARLY RETURN: not all placed" << std::endl;
         result.success = false;
         result.unplaced_pods = beam_result.unplaced_count;
         result.used_beam_search = true;
         result.solve_time_secs = elapsed.count();
         return result;
-    }
-
-    {
-        std::ofstream debug("/tmp/beam_cpp_entry.txt", std::ios::app);
-        debug << ">>> SUCCESS PATH" << std::endl;
     }
 
     // Calculate score

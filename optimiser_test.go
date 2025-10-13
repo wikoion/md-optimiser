@@ -393,7 +393,7 @@ func TestOptimisePlacementRaw_ScoreOnlyMode(t *testing.T) {
 	t.Logf("  Message: %s", result.Message)
 }
 
-func TestOptimisePlacementRaw_GreedyOnly(t *testing.T) {
+func TestOptimisePlacementRaw_BeamSearchOnly(t *testing.T) {
 	// Create simple test scenario
 	mds := []optimiser.MachineDeployment{
 		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
@@ -417,28 +417,28 @@ func TestOptimisePlacementRaw_GreedyOnly(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	config := &optimiser.OptimizationConfig{
-		GreedyOnly: boolPtr(true),
+		BeamSearchOnly: boolPtr(true),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
 	if !result.Succeeded {
-		t.Fatalf("Expected greedy-only to succeed: %s", result.Message)
+		t.Fatalf("Expected beam-search-only to succeed: %s", result.Message)
 	}
 
 	assert.True(t, result.UsedBeamSearch, "Expected UsedBeamSearch to be true")
 	assert.True(t, result.BeamSearchFallback, "Expected BeamSearchFallback to be true")
-	assert.Equal(t, 0, result.CPSATAttempts, "Expected 0 CP-SAT attempts in greedy-only mode")
+	assert.Equal(t, 0, result.CPSATAttempts, "Expected 0 CP-SAT attempts in beam-search-only mode")
 	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
 
-	t.Logf("Greedy-only test successful:")
+	t.Logf("Beam-search-only test successful:")
 	t.Logf("  Objective: %.2f", result.Objective)
 	t.Logf("  Used Beam Search: %v", result.UsedBeamSearch)
 	t.Logf("  Assignments: %v", result.PodAssignments)
 }
 
-func TestOptimisePlacementRaw_GreedyHint(t *testing.T) {
-	// Create test scenario where greedy hint should help
+func TestOptimisePlacementRaw_BeamSearchHint(t *testing.T) {
+	// Create test scenario where beam search hint should help
 	mds := []optimiser.MachineDeployment{
 		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
 		&mockMD{name: "md-2", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
@@ -461,29 +461,29 @@ func TestOptimisePlacementRaw_GreedyHint(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	config := &optimiser.OptimizationConfig{
-		MaxAttempts:       intPtr(3),
-		UseGreedyHint:     boolPtr(true),
-		GreedyHintAttempt: intPtr(2),
-		MaxRuntimeSeconds: intPtr(5),
+		MaxAttempts:           intPtr(3),
+		UseBeamSearchHint:     boolPtr(true),
+		BeamSearchHintAttempt: intPtr(2),
+		MaxRuntimeSeconds:     intPtr(5),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
 	if !result.Succeeded {
-		t.Fatalf("Expected optimization with greedy hint to succeed: %s", result.Message)
+		t.Fatalf("Expected optimization with beam search hint to succeed: %s", result.Message)
 	}
 
 	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
 	assert.True(t, result.CPSATAttempts >= 1, "Expected at least 1 CP-SAT attempt")
 
-	t.Logf("Greedy hint test successful:")
+	t.Logf("Beam search hint test successful:")
 	t.Logf("  Objective: %.2f", result.Objective)
 	t.Logf("  Used Beam Search: %v", result.UsedBeamSearch)
 	t.Logf("  CP-SAT Attempts: %d", result.CPSATAttempts)
 	t.Logf("  Best Attempt: %d", result.BestAttempt)
 }
 
-func TestOptimisePlacementRaw_GreedyFallback(t *testing.T) {
+func TestOptimisePlacementRaw_BeamSearchFallback(t *testing.T) {
 	// Create a difficult scenario that might challenge CP-SAT
 	mds := []optimiser.MachineDeployment{
 		&mockMD{name: "md-1", cpu: 2.0, memory: 4.0, maxScaleOut: 3},
@@ -507,21 +507,21 @@ func TestOptimisePlacementRaw_GreedyFallback(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	config := &optimiser.OptimizationConfig{
-		MaxAttempts:       intPtr(2),
-		MaxRuntimeSeconds: intPtr(1), // Very short timeout to potentially trigger fallback
-		FallbackToGreedy:  boolPtr(true),
+		MaxAttempts:          intPtr(2),
+		MaxRuntimeSeconds:    intPtr(1), // Very short timeout to potentially trigger fallback
+		FallbackToBeamSearch: boolPtr(true),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 
-	// Either CP-SAT succeeds or greedy fallback kicks in
+	// Either CP-SAT succeeds or beam search fallback kicks in
 	if !result.Succeeded {
-		t.Fatalf("Expected solution (either CP-SAT or greedy): %s", result.Message)
+		t.Fatalf("Expected solution (either CP-SAT or beam search): %s", result.Message)
 	}
 
 	assert.Len(t, result.PodAssignments, numPods, "Expected all pods to be assigned")
 
-	t.Logf("Greedy fallback test successful:")
+	t.Logf("Beam search fallback test successful:")
 	t.Logf("  Objective: %.2f", result.Objective)
 	t.Logf("  Used Beam Search: %v", result.UsedBeamSearch)
 	t.Logf("  Beam Search Fallback: %v", result.BeamSearchFallback)

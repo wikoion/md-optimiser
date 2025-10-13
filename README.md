@@ -98,10 +98,10 @@ result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config
 Use greedy to warm-start CP-SAT for improved solution quality:
 ```go
 config := &optimiser.OptimizationConfig{
-    MaxAttempts:       optimiser.IntPtr(5),
-    UseGreedyHint:     optimiser.BoolPtr(true),
-    GreedyHintAttempt: optimiser.IntPtr(2),  // inject greedy hint on attempt 2
-    MaxRuntimeSeconds: optimiser.IntPtr(10),
+    MaxAttempts:          optimiser.IntPtr(5),
+    UseBeamSearchHint:    optimiser.BoolPtr(true),
+    BeamSearchHintAttempt: optimiser.IntPtr(2),  // inject greedy hint on attempt 2
+    MaxRuntimeSeconds:    optimiser.IntPtr(10),
 }
 result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)
 ```

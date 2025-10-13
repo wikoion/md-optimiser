@@ -26,7 +26,7 @@ jobs:
 
       - name: Install OR-Tools
         run: |
-          curl -L -o ortools.tar.gz https://github.com/google/or-tools/releases/download/v9.13/or-tools_amd64_ubuntu-24.04_cpp_v9.13.4784.tar.gz
+          curl -L -o ortools.tar.gz https://github.com/google/or-tools/releases/download/v9.14/or-tools_amd64_ubuntu-24.04_cpp_v9.14.6206.tar.gz
           sudo tar -xzf ortools.tar.gz -C /usr/local --strip-components=1
           echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/ortools.conf
           sudo ldconfig

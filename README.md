@@ -22,8 +22,10 @@ go build
 ## Usage
 
 Import the module as `github.com/wikoion/md-optimiser` and call `OptimisePlacementRaw`. Machine Deployment and Pod interfaces
-exist to allow type flexibility. Implement your own types and pass your mds, pods and placement rules as slices. 
+exist to allow type flexibility. Implement your own types and pass your mds, pods and placement rules as slices.
 Plugin scores allow expressing per‑deployment preferences (higher scores = more preferred).
+
+### Basic Example
 
 ```go
 type md struct {
@@ -51,16 +53,22 @@ pods := []optimiser.Pod{
 scores := []float64{1.0}              // one score per MD
 allowed := []int{1}                   // pod 0 may run on MD 0
 initial := [][][]int{{{0, 0}}}        // optional warm start: pod 0 -> MD 0, slot 0
-maxRuntime := 10                      // optional runtime limit in seconds
-improvementThreshold := 5.0           // optional: min improvement % required
+
+// Configure optimization behavior
+config := &optimiser.OptimizationConfig{
+    MaxRuntimeSeconds:    optimiser.IntPtr(15),    // timeout per CP-SAT attempt
+    ImprovementThreshold: optimiser.FloatPtr(5.0), // require 5% improvement
+}
 
 result := optimiser.OptimisePlacementRaw(
-    mds, pods, scores, allowed, initial, &maxRuntime, &improvementThreshold,
+    mds, pods, scores, allowed, initial, config,
 )
 if result.Succeeded {
     for i, assignment := range result.PodAssignments {
         fmt.Printf("Pod %d -> MD %d, Slot %d\n", i, assignment.MD, assignment.Slot)
     }
+    fmt.Printf("Used greedy: %v, CP-SAT attempts: %d\n",
+        result.UsedGreedy, result.CPSATAttempts)
 }
 ```
 
@@ -69,11 +77,88 @@ plugins, greedy warm start generation and reporting of resource waste.
 
 ## Key Features
 
+### Greedy Heuristic with CP-SAT Optimization
+The optimiser now includes a fast greedy placement heuristic that can be used standalone or combined with CP-SAT optimization:
+
+#### Greedy-Only Mode
+Use the greedy heuristic alone for fast approximate solutions:
+```go
+config := &optimiser.OptimizationConfig{
+    BeamSearchOnly: optimiser.BoolPtr(true),
+}
+result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)
+```
+- Very fast (milliseconds vs seconds for CP-SAT)
+- Affinity-aware placement with BFS-based grouping
+- Best-fit bin-packing to minimize waste
+- Constraint-aware pod ordering (most constrained first)
+- Ideal for large workloads or time-sensitive scenarios
+
+#### Greedy Hint Mode
+Use greedy to warm-start CP-SAT for improved solution quality:
+```go
+config := &optimiser.OptimizationConfig{
+    MaxAttempts:          optimiser.IntPtr(5),
+    UseBeamSearchHint:    optimiser.BoolPtr(true),
+    BeamSearchHintAttempt: optimiser.IntPtr(2),  // inject greedy hint on attempt 2
+    MaxRuntimeSeconds:    optimiser.IntPtr(10),
+}
+result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)
+```
+- Runs greedy algorithm to generate initial solution
+- Provides hint to CP-SAT on specified attempt
+- Often helps CP-SAT find better solutions faster
+- Check `result.UsedGreedy` to see if hint was used
+
+#### Greedy Fallback Mode
+Use greedy as a safety net if all CP-SAT attempts fail:
+```go
+config := &optimiser.OptimizationConfig{
+    MaxAttempts:      optimiser.IntPtr(3),
+    FallbackToBeamSearch: optimiser.BoolPtr(true),
+    MaxRuntimeSeconds: optimiser.IntPtr(5),
+}
+result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)
+```
+- Attempts CP-SAT optimization first
+- Falls back to greedy if no acceptable solution found
+- Ensures you always get a valid placement
+- Check `result.GreedyFallback` to see if fallback was used
+
+#### Multiple CP-SAT Attempts
+Run CP-SAT multiple times to find better solutions:
+```go
+config := &optimiser.OptimizationConfig{
+    MaxAttempts:       optimiser.IntPtr(5),  // try up to 5 times
+    MaxRuntimeSeconds: optimiser.IntPtr(10), // 10 seconds per attempt
+}
+result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)
+fmt.Printf("Best solution found on attempt %d\n", result.BestAttempt)
+```
+- Each attempt uses the same timeout
+- Tracks best solution across all attempts
+- Returns as soon as an acceptable solution is found
+- Use `result.CPSATAttempts` and `result.BestAttempt` for diagnostics
+
 ### Slot-Aware Placement
-The optimiser now explicitly models individual slots within each machine deployment. This provides:
+The optimiser explicitly models individual slots within each machine deployment. This provides:
 - Fine-grained control over pod placement within scaled-out deployments
 - Better resource utilization tracking per slot
 - Support for affinity rules at the slot level
+
+### Score-Only Mode
+The optimiser can evaluate the current deployment score without performing optimization:
+```go
+config := &optimiser.OptimizationConfig{
+    ScoreOnly: optimiser.BoolPtr(true),
+}
+result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)
+fmt.Printf("Current deployment score: %.2f\n", result.Objective)
+```
+- Returns immediately without running CP-SAT or greedy (very fast, O(n) complexity)
+- Use for monitoring, alerting, or deciding whether to trigger optimization
+- Result includes the current state score in the `Objective` and `CurrentStateCost` fields
+- `PodAssignments` will be empty in score-only mode
 
 ### Improvement Threshold
 The optimiser can evaluate whether a re-optimization is worthwhile based on a minimum improvement percentage:

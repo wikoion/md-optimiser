@@ -84,7 +84,7 @@ The optimiser now includes a fast greedy placement heuristic that can be used st
 Use the greedy heuristic alone for fast approximate solutions:
 ```go
 config := &optimiser.OptimizationConfig{
-    GreedyOnly: optimiser.BoolPtr(true),
+    BeamSearchOnly: optimiser.BoolPtr(true),
 }
 result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, nil, config)
 ```

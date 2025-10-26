@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
@@ -20,10 +21,48 @@ var embeddedLibs embed.FS
 
 var alreadyLoaded = false
 var libHandle unsafe.Pointer
+var preloadOnce sync.Once
+var preloadErr error
 
 // GetLibHandle returns the loaded library handle
 func GetLibHandle() unsafe.Pointer {
 	return libHandle
+}
+
+func preloadORTools() error {
+	preloadOnce.Do(func() {
+		home := os.Getenv("ORTOOLS_HOME")
+		if home == "" {
+			home = "/opt/or-tools/current"
+		}
+
+		var libName string
+		switch runtime.GOOS {
+		case "linux":
+			libName = "libortools.so"
+		case "darwin":
+			libName = "libortools.dylib"
+		default:
+			preloadErr = fmt.Errorf("unsupported platform for OR-Tools preload: %s", runtime.GOOS)
+			return
+		}
+
+		libPath := filepath.Join(home, "lib", libName)
+		if _, err := os.Stat(libPath); err != nil {
+			preloadErr = fmt.Errorf("expected OR-Tools library at %s: %w", libPath, err)
+			return
+		}
+
+		cPath := C.CString(libPath)
+		defer C.free(unsafe.Pointer(cPath))
+
+		handle := C.dlopen(cPath, C.RTLD_NOW|C.RTLD_GLOBAL)
+		if handle == nil {
+			preloadErr = fmt.Errorf("dlopen failed for %s: %s", libPath, C.GoString(C.dlerror()))
+		}
+	})
+
+	return preloadErr
 }
 
 func extractAndLoadSharedLibrary() error {
@@ -52,6 +91,10 @@ func extractAndLoadSharedLibrary() error {
 	tmpPath := filepath.Join(os.TempDir(), libName)
 	if err := os.WriteFile(tmpPath, data, 0o755); err != nil {
 		return fmt.Errorf("writing embedded lib to disk: %w", err)
+	}
+
+	if err := preloadORTools(); err != nil {
+		return err
 	}
 
 	cPath := C.CString(tmpPath)

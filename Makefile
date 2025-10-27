@@ -1,6 +1,10 @@
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 
+# OR-Tools location (defaults to isolated installation)
+ORTOOLS_HOME ?= /opt/or-tools/current
+export ORTOOLS_HOME
+
 all: build
 
 build:

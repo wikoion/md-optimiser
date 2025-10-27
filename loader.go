@@ -12,18 +12,87 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"unsafe"
 )
 
 //go:embed lib/liboptimiser_*.dylib lib/liboptimiser_*.so
 var embeddedLibs embed.FS
 
+const (
+	goosLinux  = "linux"
+	goosDarwin = "darwin"
+)
+
 var alreadyLoaded = false
 var libHandle unsafe.Pointer
+var preloadOnce sync.Once
+var preloadErr error
 
 // GetLibHandle returns the loaded library handle
 func GetLibHandle() unsafe.Pointer {
 	return libHandle
+}
+
+func preloadORTools() error {
+	preloadOnce.Do(func() {
+		var libName string
+		switch runtime.GOOS {
+		case goosLinux:
+			libName = "libortools.so"
+		case goosDarwin:
+			libName = "libortools.dylib"
+		default:
+			preloadErr = fmt.Errorf("unsupported platform for OR-Tools preload: %s", runtime.GOOS)
+			return
+		}
+
+		candidateDirs := []string{}
+		if home := os.Getenv("ORTOOLS_HOME"); home != "" {
+			candidateDirs = append(candidateDirs, filepath.Join(home, "lib"))
+		}
+		if libDir := os.Getenv("ORTOOLS_LIB_DIR"); libDir != "" {
+			candidateDirs = append(candidateDirs, libDir)
+		}
+		candidateDirs = append(candidateDirs,
+			filepath.Join("/opt/or-tools/current", "lib"),
+			"/usr/local/lib",
+		)
+
+		seen := make(map[string]struct{})
+		var checked []string
+		for _, dir := range candidateDirs {
+			if dir == "" {
+				continue
+			}
+			if _, ok := seen[dir]; ok {
+				continue
+			}
+			seen[dir] = struct{}{}
+
+			libPath := filepath.Join(dir, libName)
+			checked = append(checked, libPath)
+			if _, err := os.Stat(libPath); err != nil {
+				continue
+			}
+
+			cPath := C.CString(libPath)
+			defer C.free(unsafe.Pointer(cPath))
+
+			handle := C.dlopen(cPath, C.RTLD_NOW|C.RTLD_GLOBAL)
+			if handle == nil {
+				preloadErr = fmt.Errorf("dlopen failed for %s: %s", libPath, C.GoString(C.dlerror()))
+				return
+			}
+			preloadErr = nil
+			return
+		}
+
+		preloadErr = fmt.Errorf("expected OR-Tools library at one of: %s", strings.Join(checked, ", "))
+	})
+
+	return preloadErr
 }
 
 func extractAndLoadSharedLibrary() error {
@@ -34,11 +103,11 @@ func extractAndLoadSharedLibrary() error {
 
 	var libName string
 	switch {
-	case runtime.GOOS == "darwin" && runtime.GOARCH == "arm64":
+	case runtime.GOOS == goosDarwin && runtime.GOARCH == "arm64":
 		libName = "liboptimiser_darwin_arm64.dylib"
-	case runtime.GOOS == "linux" && runtime.GOARCH == "amd64":
+	case runtime.GOOS == goosLinux && runtime.GOARCH == "amd64":
 		libName = "liboptimiser_linux_amd64.so"
-	case runtime.GOOS == "linux" && runtime.GOARCH == "arm64":
+	case runtime.GOOS == goosLinux && runtime.GOARCH == "arm64":
 		libName = "liboptimiser_linux_arm64.so"
 	default:
 		return fmt.Errorf("unsupported platform: %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -52,6 +121,10 @@ func extractAndLoadSharedLibrary() error {
 	tmpPath := filepath.Join(os.TempDir(), libName)
 	if err := os.WriteFile(tmpPath, data, 0o755); err != nil {
 		return fmt.Errorf("writing embedded lib to disk: %w", err)
+	}
+
+	if err := preloadORTools(); err != nil {
+		return err
 	}
 
 	cPath := C.CString(tmpPath)

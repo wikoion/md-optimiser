@@ -6,7 +6,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_library(optimiser SHARED optimiser.cpp)
 
-find_package(ortools REQUIRED)
+if(DEFINED ENV{ORTOOLS_HOME})
+  list(PREPEND CMAKE_PREFIX_PATH "$ENV{ORTOOLS_HOME}")
+endif()
+
+find_package(ortools REQUIRED CONFIG)
 target_link_libraries(optimiser PRIVATE ortools::ortools)
 
 set_target_properties(optimiser PROPERTIES

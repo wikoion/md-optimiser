@@ -1849,8 +1849,40 @@ SolverResult OptimisePlacement(
                 result.best_attempt = 0;
                 result.unplaced_pods = 0;
                 return result;
+            } else {
+                // Placement is feasible but offers no improvement
+                CopyBeamResultToOutput(beam_result, mds, num_mds, num_pods,
+                                       out_slot_assignments, out_slots_used);
+                result.success = true;
+                result.objective = current_state_cost;
+                result.status_code = static_cast<int>(FEASIBLE);
+                result.already_optimal = true;
+                result.used_beam_search = true;
+                result.beam_search_fallback = true;
+                result.best_attempt = 0;
+                result.unplaced_pods = 0;
+                return result;
             }
         }
+    }
+
+    if (have_best) {
+        // CP-SAT found a feasible assignment but it doesn't improve on current state
+        CopyBeamResultToOutput(BeamResult{
+            best_cpsat_result.assignments,
+            best_cpsat_result.slots_used,
+            true,
+            0
+        }, mds, num_mds, num_pods, out_slot_assignments, out_slots_used);
+
+        result.success = true;
+        result.objective = best_score;
+        result.status_code = best_cpsat_result.status_code;
+        result.solve_time_secs = best_cpsat_result.solve_time_secs;
+        result.already_optimal = true;
+        result.best_attempt = num_attempts;
+        result.unplaced_pods = 0;
+        return result;
     }
 
     // No solution found that improves current state

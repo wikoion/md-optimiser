@@ -1,3 +1,5 @@
+#include "optimiser.hpp"
+
 // Core headers from the OR-Tools Constraint Programming (CP-SAT) solver
 #include "ortools/sat/cp_model.h"
 #include "ortools/sat/cp_model.pb.h"
@@ -28,47 +30,12 @@ namespace std {
 
 extern "C" {
 
-// Describes a scalable group of machines with a type, size, and max count
-struct MachineDeployment {
-    const char* name;
-    double cpu;
-    double memory;
-    int max_scale_out;
-};
-
-// Describes a single workload unit that needs placement
-struct Pod {
-    double cpu;
-    double memory;
-    const int* affinity_peers;
-    const int* affinity_rules;
-    int affinity_count;
-    const int* soft_peers;
-    const double* soft_affinities;
-    int soft_affinity_count;
-    int current_md_assignment; // Index of MD this pod is currently placed on (-1 if unknown)
-};
-
 enum SolverStatus {
     UNKNOWN = 0,
     MODEL_INVALID = 1,
     FEASIBLE = 2,
     INFEASIBLE = 3,
     OPTIMAL = 4
-};
-
-struct SolverResult {
-    bool success;
-    double objective;
-    int status_code;
-    double solve_time_secs;
-    double current_state_cost;  // Cost of current state before optimization
-    bool already_optimal;       // True if improvement doesn't meet threshold
-    bool used_beam_search;      // True if beam search was used (hint or fallback)
-    bool beam_search_fallback;  // True if pure beam search fallback was used
-    int cpsat_attempts;         // Number of CP-SAT attempts made
-    int best_attempt;           // Which attempt produced the result
-    int unplaced_pods;          // Number of pods that couldn't be placed
 };
 }
 
@@ -197,10 +164,6 @@ public:
     }
 
 };
-
-// ============================================================================
-// BEAM SEARCH HEURISTIC IMPLEMENTATION
-// ============================================================================
 
 // Structure to track pod assignment in beam search algorithm
 struct BeamAssignment {
@@ -717,11 +680,6 @@ vector<int> CalculateOptimalMDOrder(
     return md_order;
 }
 
-
-// ============================================================================
-// BEAM SEARCH GREEDY - Enhanced backtracking bin-packing
-// ============================================================================
-
 // SearchState: Represents a partial solution during beam search
 struct SearchState {
     vector<BeamAssignment> assignments;
@@ -987,13 +945,6 @@ BeamResult RunBeamSearch(
     // Sort pods by difficulty (largest, most constrained first)
     vector<int> pod_order = SortPodsByDifficulty(pods, num_pods, allowed_matrix, num_mds);
 
-    // Optional debug file (disabled by default for performance)
-    // std::ofstream debug("/tmp/beam_debug_cpp.txt");
-    // debug << "Starting beam search with " << num_pods << " pods" << std::endl;
-    // debug << "Beam width: " << beam_width << ", MD candidates: " << md_candidates << std::endl;
-    // debug << "Affinity groups placed: " << affinity_groups.size() << std::endl;
-    // debug << "Pods already placed: " << beam[0].pods_placed << std::endl;
-
     // Process each pod in order
     for (int i = 0; i < (int)pod_order.size(); ++i) {
         int pod_idx = pod_order[i];
@@ -1004,9 +955,6 @@ BeamResult RunBeamSearch(
         }
 
         vector<SearchState> next_beam;
-
-        // debug << "\n=== Pod " << i << "/" << num_pods << " (idx=" << pod_idx << ") ===" << std::endl;
-        // debug << "Current beam size: " << beam.size() << std::endl;
 
         // For each state in current beam
         for (size_t beam_idx = 0; beam_idx < beam.size(); ++beam_idx) {
@@ -1040,8 +988,6 @@ BeamResult RunBeamSearch(
                 }
             }
 
-            // debug << "  Beam state " << beam_idx << ": " << existing_options.size() << " existing slots, ";
-
             // If we found existing slots, create states for top ones
             if (!existing_options.empty()) {
                 // Sort by score (best first)
@@ -1065,15 +1011,12 @@ BeamResult RunBeamSearch(
                     new_state.waste_score = new_state.CalculateWaste(mds, num_mds, plugin_scores);
                     next_beam.push_back(new_state);
                 }
-                // debug << "used top " << limit << " existing" << std::endl;
             } else {
                 // No existing slots - need to create new nodes
                 // Get top MD choices for creating new nodes
                 vector<int> md_choices = SelectTopMDsForPod(pod_idx, state, mds, num_mds,
                                                             pods, plugin_scores,
                                                             allowed_matrix, md_candidates);
-
-                // debug << md_choices.size() << " new node options" << std::endl;
 
                 for (int md_idx : md_choices) {
                     SearchState new_state = state.Clone();
@@ -1087,12 +1030,8 @@ BeamResult RunBeamSearch(
             }
         }
 
-        // debug << "Next beam size: " << next_beam.size() << std::endl;
-
         // If no placements found, return failure
         if (next_beam.empty()) {
-            // debug << "FAILURE: Beam became empty at pod " << i << "/" << num_pods << std::endl;
-            // debug.close();
             BeamResult failure;
             failure.assignments.resize(num_pods, {-1, -1});
             failure.slots_used.resize(num_mds);
@@ -1116,9 +1055,6 @@ BeamResult RunBeamSearch(
 
         beam = next_beam;
     }
-
-    // debug << "\n=== SUCCESS: All pods placed ===" << std::endl;
-    // debug.close();
 
     // Return best state from final beam
     if (beam.empty()) {
@@ -1553,10 +1489,6 @@ CPSATResult RunCPSATSolverAttempt(
 
     return result;
 }
-
-// ============================================================================
-// END BEAM SEARCH HEURISTIC IMPLEMENTATION
-// ============================================================================
 
 extern "C" {
 

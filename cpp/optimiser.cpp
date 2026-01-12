@@ -1211,10 +1211,12 @@ double CalculateSolutionCost(
     for (int i = 0; i < num_pods; ++i) {
         const Pod& pod = pods[i];
         if (pod.soft_affinity_count == 0) continue;
+        if (assignments[i].md < 0 || assignments[i].slot < 0) continue;
 
         for (int p = 0; p < pod.soft_affinity_count; ++p) {
             int peer = pod.soft_peers[p];
             if (peer < 0 || peer >= num_pods) continue;
+            if (assignments[peer].md < 0 || assignments[peer].slot < 0) continue;
 
             auto pair = std::minmax(i, peer);
             if (!soft_seen.insert(pair).second) continue;
@@ -1315,45 +1317,65 @@ double CalculateCurrentStateCost(
     int num_pods,
     const double* plugin_scores
 ) {
-    double current_state_cost = 0.0;
-    std::vector<bool> md_currently_used(num_mds, false);
+    // Build current assignments vector from pod current_md_assignment
+    vector<BeamAssignment> current_assignments(num_pods);
 
-    // Mark which MDs are currently being used
+    // Track which pods are assigned to each MD for slot assignment
+    vector<vector<int>> pods_per_md(num_mds);
+
     for (int i = 0; i < num_pods; ++i) {
-        int current_md = pods[i].current_md_assignment;
+        const int current_md = pods[i].current_md_assignment;
+
+        // Validate current_md_assignment to avoid out-of-bounds access
         if (current_md >= 0 && current_md < num_mds) {
-            md_currently_used[current_md] = true;
+            current_assignments[i].md = current_md;
+            pods_per_md[current_md].push_back(i);
+        } else {
+            // Treat invalid assignments as unassigned (no current placement)
+            current_assignments[i].md = -1;
         }
+        // We'll assign proper slots below after calculating nodes needed
+        current_assignments[i].slot = -1;
     }
 
-    // Calculate current cost based on waste from current pod placements
+    // Build current slots_used based on current pod assignments
+    // We need to infer how many nodes are currently being used per MD
+    vector<vector<bool>> current_slots_used(num_mds);
+
     for (int j = 0; j < num_mds; ++j) {
-        if (md_currently_used[j]) {
-            // Calculate current resource usage for this MD
-            double cpu_used = 0.0, mem_used = 0.0;
-            for (int i = 0; i < num_pods; ++i) {
-                if (pods[i].current_md_assignment == j) {
-                    cpu_used += pods[i].cpu * 100.0;
-                    mem_used += pods[i].memory * 100.0;
-                }
+        // Calculate total resource usage for pods assigned to this MD
+        double cpu_used = 0.0, mem_used = 0.0;
+        for (int pod_idx : pods_per_md[j]) {
+            cpu_used += pods[pod_idx].cpu * 100.0;
+            mem_used += pods[pod_idx].memory * 100.0;
+        }
+
+        // Calculate minimum number of nodes needed
+        double cpu_per_node = mds[j].cpu * 100.0;
+        double mem_per_node = mds[j].memory * 100.0;
+
+        int nodes_needed_for_cpu = (cpu_per_node > 0) ? static_cast<int>(std::ceil(cpu_used / cpu_per_node)) : 0;
+        int nodes_needed_for_mem = (mem_per_node > 0) ? static_cast<int>(std::ceil(mem_used / mem_per_node)) : 0;
+        int nodes_needed = std::max(nodes_needed_for_cpu, nodes_needed_for_mem);
+
+        // Initialize slots_used for this MD. Do not cap at max_scale_out for cost estimation.
+        current_slots_used[j].assign(nodes_needed, true);
+
+        // Distribute pods across slots to avoid soft affinity penalty issues
+        // We don't know the actual slot distribution, so spread pods evenly
+        // This gives a reasonable approximation for cost calculation
+        if (nodes_needed > 0 && !pods_per_md[j].empty()) {
+            int pods_per_node = (pods_per_md[j].size() + nodes_needed - 1) / nodes_needed;
+            for (size_t i = 0; i < pods_per_md[j].size(); ++i) {
+                int pod_idx = pods_per_md[j][i];
+                int slot = std::min(static_cast<int>(i / pods_per_node), nodes_needed - 1);
+                current_assignments[pod_idx].slot = slot;
             }
-
-            // Calculate provisioned resources (assuming 1 node currently)
-            double cpu_provisioned = mds[j].cpu * 100.0;
-            double mem_provisioned = mds[j].memory * 100.0;
-
-            // Calculate waste
-            double cpu_waste = cpu_provisioned - cpu_used;
-            double mem_waste = mem_provisioned - mem_used;
-
-            // Add plugin score component
-            int plugin_weight = static_cast<int>((1.0 - plugin_scores[j]) * 1000.0) + 1;
-
-            current_state_cost += (cpu_waste + mem_waste) * 1000.0 + plugin_weight;
         }
     }
 
-    return current_state_cost;
+    // Now calculate cost using the same method as CalculateSolutionCost
+    return CalculateSolutionCost(current_assignments, current_slots_used, mds, num_mds, pods, num_pods, plugin_scores);
 }
 
 // Structure for CP-SAT solver result

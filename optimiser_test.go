@@ -765,7 +765,10 @@ func TestCurrentStateCostAccuracy(t *testing.T) {
 	// Current state cost and optimized cost should be equal (or very close)
 	// since the current placement is already optimal
 	costDiff := optResult.Objective - scoreResult.CurrentStateCost
-	percentDiff := (costDiff / scoreResult.CurrentStateCost) * 100
+	var percentDiff float64
+	if scoreResult.CurrentStateCost >= 1.0 {
+		percentDiff = (costDiff / scoreResult.CurrentStateCost) * 100
+	}
 
 	t.Logf("Current State Cost: %.2f", scoreResult.CurrentStateCost)
 	t.Logf("Optimized Cost: %.2f", optResult.Objective)
@@ -780,6 +783,65 @@ func TestCurrentStateCostAccuracy(t *testing.T) {
 		assert.InDelta(t, scoreResult.CurrentStateCost, optResult.Objective, 100.0,
 			"When already optimal, current and optimized costs should be nearly equal")
 	}
+}
+
+func TestCurrentStateCostExceedsMaxScaleOut(t *testing.T) {
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "tiny", cpu: 2.0, memory: 2.0, maxScaleOut: 1},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPodWithAssignment{cpu: 2.0, memory: 2.0, currentMDAssignment: 0, labels: map[string]string{}},
+		&mockPodWithAssignment{cpu: 2.0, memory: 2.0, currentMDAssignment: 0, labels: map[string]string{}},
+	}
+
+	scores := []float64{1.0}
+	allowed := []int{1, 1}
+	initial := make([][][]int, 0)
+
+	config := &optimiser.OptimizationConfig{
+		ScoreOnly: optimiser.BoolPtr(true),
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	assert.True(t, result.Succeeded)
+
+	// 2 nodes needed even though maxScaleOut is 1; cost should not go negative.
+	expectedCost := 2000.0
+	assert.Equal(t, expectedCost, result.CurrentStateCost)
+}
+
+func TestCurrentStateCostSkipsUnassignedSoftAffinity(t *testing.T) {
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "small", cpu: 2.0, memory: 2.0, maxScaleOut: 1},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{
+			cpu:                1.0,
+			memory:             1.0,
+			labels:             map[string]string{},
+			softAffinityPeers:  []int{1},
+			softAffinityValues: []float64{-1.0},
+		},
+		&mockPod{
+			cpu:                1.0,
+			memory:             1.0,
+			labels:             map[string]string{},
+			softAffinityPeers:  []int{0},
+			softAffinityValues: []float64{-1.0},
+		},
+	}
+
+	scores := []float64{1.0}
+	allowed := []int{1, 1}
+	initial := make([][][]int, 0)
+
+	config := &optimiser.OptimizationConfig{
+		ScoreOnly: optimiser.BoolPtr(true),
+	}
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	assert.True(t, result.Succeeded)
+	assert.Equal(t, 0.0, result.CurrentStateCost)
 }
 
 // Helper functions are provided by optimiser.BoolPtr, optimiser.IntPtr, optimiser.FloatPtr

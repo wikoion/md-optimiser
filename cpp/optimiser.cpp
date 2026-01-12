@@ -1211,10 +1211,12 @@ double CalculateSolutionCost(
     for (int i = 0; i < num_pods; ++i) {
         const Pod& pod = pods[i];
         if (pod.soft_affinity_count == 0) continue;
+        if (assignments[i].md < 0 || assignments[i].slot < 0) continue;
 
         for (int p = 0; p < pod.soft_affinity_count; ++p) {
             int peer = pod.soft_peers[p];
             if (peer < 0 || peer >= num_pods) continue;
+            if (assignments[peer].md < 0 || assignments[peer].slot < 0) continue;
 
             auto pair = std::minmax(i, peer);
             if (!soft_seen.insert(pair).second) continue;
@@ -1356,13 +1358,8 @@ double CalculateCurrentStateCost(
         int nodes_needed_for_mem = (mem_per_node > 0) ? static_cast<int>(std::ceil(mem_used / mem_per_node)) : 0;
         int nodes_needed = std::max(nodes_needed_for_cpu, nodes_needed_for_mem);
 
-        // Initialize slots_used for this MD
-        current_slots_used[j].resize(mds[j].max_scale_out, false);
-
-        // Mark the needed nodes as used
-        for (int slot = 0; slot < nodes_needed && slot < mds[j].max_scale_out; ++slot) {
-            current_slots_used[j][slot] = true;
-        }
+        // Initialize slots_used for this MD. Do not cap at max_scale_out for cost estimation.
+        current_slots_used[j].assign(nodes_needed, true);
 
         // Distribute pods across slots to avoid soft affinity penalty issues
         // We don't know the actual slot distribution, so spread pods evenly

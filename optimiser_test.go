@@ -417,7 +417,7 @@ func TestOptimisePlacementRaw_BeamSearchOnly(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	config := &optimiser.OptimizationConfig{
-		BeamSearchOnly: boolPtr(true),
+		BeamSearchOnly: optimiser.BoolPtr(true),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
@@ -461,10 +461,10 @@ func TestOptimisePlacementRaw_BeamSearchHint(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	config := &optimiser.OptimizationConfig{
-		MaxAttempts:           intPtr(3),
-		UseBeamSearchHint:     boolPtr(true),
-		BeamSearchHintAttempt: intPtr(2),
-		MaxRuntimeSeconds:     intPtr(5),
+		MaxAttempts:           optimiser.IntPtr(3),
+		UseBeamSearchHint:     optimiser.BoolPtr(true),
+		BeamSearchHintAttempt: optimiser.IntPtr(2),
+		MaxRuntimeSeconds:     optimiser.IntPtr(5),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
@@ -507,9 +507,9 @@ func TestOptimisePlacementRaw_BeamSearchFallback(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	config := &optimiser.OptimizationConfig{
-		MaxAttempts:          intPtr(2),
-		MaxRuntimeSeconds:    intPtr(1), // Very short timeout to potentially trigger fallback
-		FallbackToBeamSearch: boolPtr(true),
+		MaxAttempts:          optimiser.IntPtr(2),
+		MaxRuntimeSeconds:    optimiser.IntPtr(1), // Very short timeout to potentially trigger fallback
+		FallbackToBeamSearch: optimiser.BoolPtr(true),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
@@ -551,8 +551,8 @@ func TestOptimisePlacementRaw_MultipleAttempts(t *testing.T) {
 	initial := make([][][]int, 0)
 
 	config := &optimiser.OptimizationConfig{
-		MaxAttempts:       intPtr(5),
-		MaxRuntimeSeconds: intPtr(3),
+		MaxAttempts:       optimiser.IntPtr(5),
+		MaxRuntimeSeconds: optimiser.IntPtr(3),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
@@ -653,8 +653,8 @@ func TestOptimisePlacementRaw_ImprovementThreshold(t *testing.T) {
 
 	// Set a very high threshold - solution might not meet it
 	config := &optimiser.OptimizationConfig{
-		ImprovementThreshold: floatPtr(50.0), // Require 50% improvement
-		MaxRuntimeSeconds:    intPtr(5),
+		ImprovementThreshold: optimiser.FloatPtr(50.0), // Require 50% improvement
+		MaxRuntimeSeconds:    optimiser.IntPtr(5),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
@@ -703,7 +703,7 @@ func TestCurrentStateCostWithMultipleNodes(t *testing.T) {
 
 	// Use score-only mode to get current state cost
 	config := &optimiser.OptimizationConfig{
-		ScoreOnly: boolPtr(true),
+		ScoreOnly: optimiser.BoolPtr(true),
 	}
 
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
@@ -750,14 +750,14 @@ func TestCurrentStateCostAccuracy(t *testing.T) {
 
 	// First get current state cost in score-only mode
 	config := &optimiser.OptimizationConfig{
-		ScoreOnly: boolPtr(true),
+		ScoreOnly: optimiser.BoolPtr(true),
 	}
 	scoreResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 	assert.True(t, scoreResult.Succeeded)
 
 	// Now optimize
 	config = &optimiser.OptimizationConfig{
-		MaxRuntimeSeconds: intPtr(5),
+		MaxRuntimeSeconds: optimiser.IntPtr(5),
 	}
 	optResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 	assert.True(t, optResult.Succeeded)
@@ -782,14 +782,4 @@ func TestCurrentStateCostAccuracy(t *testing.T) {
 	}
 }
 
-func boolPtr(b bool) *bool {
-	return optimiser.BoolPtr(b)
-}
-
-func intPtr(i int) *int {
-	return optimiser.IntPtr(i)
-}
-
-func floatPtr(f float64) *float64 {
-	return optimiser.FloatPtr(f)
-}
+// Helper functions are provided by optimiser.BoolPtr, optimiser.IntPtr, optimiser.FloatPtr

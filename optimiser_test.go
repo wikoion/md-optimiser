@@ -671,6 +671,117 @@ func TestOptimisePlacementRaw_ImprovementThreshold(t *testing.T) {
 	}
 }
 
+// TestCurrentStateCostWithMultipleNodes tests that current state cost is calculated
+// correctly when multiple nodes of the same MD type are running.
+// This reproduces the bug where CalculateCurrentStateCost assumed 1 node per MD.
+func TestCurrentStateCostWithMultipleNodes(t *testing.T) {
+	// Simulate Tado-like scenario: 4x m6id.2xlarge nodes with pods distributed across them
+	// Each m6id.2xlarge has 8 CPU and 32 GB memory
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "m6id.2xlarge", cpu: 8.0, memory: 32.0, maxScaleOut: 10},
+	}
+
+	// Create 16 pods that require approximately 4 nodes worth of resources
+	// Each pod: 2 CPU, 8 GB memory
+	// Total: 32 CPU, 128 GB = minimum 4 nodes of m6id.2xlarge needed
+	pods := make([]optimiser.Pod, 16)
+	for i := 0; i < 16; i++ {
+		pods[i] = &mockPodWithAssignment{
+			cpu:                 2.0,
+			memory:              8.0,
+			labels:              map[string]string{},
+			currentMDAssignment: 0, // All assigned to MD 0
+		}
+	}
+
+	scores := []float64{1.0}
+	allowed := make([]int, 16)
+	for i := range allowed {
+		allowed[i] = 1 // All pods can go to MD 0
+	}
+	initial := make([][][]int, 0)
+
+	// Use score-only mode to get current state cost
+	config := &optimiser.OptimizationConfig{
+		ScoreOnly: boolPtr(true),
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+
+	assert.True(t, result.Succeeded, "Score-only mode should succeed")
+
+	// Calculate expected cost manually:
+	// - 4 nodes needed (ceil(32 CPU / 8 per node) = 4, ceil(128 GB / 32 per node) = 4)
+	// - Each node provisions: 8 CPU * 100 + 32 GB * 100 = 800 + 3200 = 4000 units
+	// - Total provisioned: 4 nodes * 4000 = 16000 units
+	// - Total used: 32 CPU * 100 + 128 GB * 100 = 3200 + 12800 = 16000 units
+	// - Waste: 16000 - 16000 = 0 units (perfect fit!)
+	// - Plugin cost: 4 nodes * ((1.0 - 1.0) * 1000 + 1) = 4 nodes * 1 = 4
+	// - Total cost: (0 * 1000) + (4 * 1000) + 0 = 4000
+	expectedCost := 4000.0
+
+	assert.Equal(t, expectedCost, result.CurrentStateCost,
+		"Current state cost should account for all 4 nodes needed")
+	assert.Equal(t, expectedCost, result.Objective,
+		"In score-only mode, objective should equal current state cost")
+
+	t.Logf("Current State Cost: %.2f (expected: %.2f)", result.CurrentStateCost, expectedCost)
+}
+
+// TestCurrentStateCostAccuracy tests that current state cost equals optimized cost
+// when the current state is already optimal.
+func TestCurrentStateCostAccuracy(t *testing.T) {
+	// Create a scenario where current placement is optimal
+	mds := []optimiser.MachineDeployment{
+		&mockMD{name: "small", cpu: 2.0, memory: 8.0, maxScaleOut: 5},
+		&mockMD{name: "large", cpu: 8.0, memory: 32.0, maxScaleOut: 5},
+	}
+
+	// 3 pods that fit perfectly on 1 large node
+	pods := []optimiser.Pod{
+		&mockPodWithAssignment{cpu: 2.5, memory: 10.0, currentMDAssignment: 1, labels: map[string]string{}},
+		&mockPodWithAssignment{cpu: 2.5, memory: 10.0, currentMDAssignment: 1, labels: map[string]string{}},
+		&mockPodWithAssignment{cpu: 2.5, memory: 10.0, currentMDAssignment: 1, labels: map[string]string{}},
+	}
+
+	scores := []float64{1.0, 1.0}
+	allowed := []int{1, 1, 1, 1, 1, 1} // All pods can go to both MDs
+	initial := make([][][]int, 0)
+
+	// First get current state cost in score-only mode
+	config := &optimiser.OptimizationConfig{
+		ScoreOnly: boolPtr(true),
+	}
+	scoreResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	assert.True(t, scoreResult.Succeeded)
+
+	// Now optimize
+	config = &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: intPtr(5),
+	}
+	optResult := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	assert.True(t, optResult.Succeeded)
+
+	// Current state cost and optimized cost should be equal (or very close)
+	// since the current placement is already optimal
+	costDiff := optResult.Objective - scoreResult.CurrentStateCost
+	percentDiff := (costDiff / scoreResult.CurrentStateCost) * 100
+
+	t.Logf("Current State Cost: %.2f", scoreResult.CurrentStateCost)
+	t.Logf("Optimized Cost: %.2f", optResult.Objective)
+	t.Logf("Difference: %.2f (%.2f%%)", costDiff, percentDiff)
+
+	// The optimized cost should not be worse than current state
+	assert.LessOrEqual(t, optResult.Objective, scoreResult.CurrentStateCost,
+		"Optimized cost should not be worse than current state")
+
+	// If optimizer says it's already optimal, costs should be very close
+	if optResult.AlreadyOptimal {
+		assert.InDelta(t, scoreResult.CurrentStateCost, optResult.Objective, 100.0,
+			"When already optimal, current and optimized costs should be nearly equal")
+	}
+}
+
 func boolPtr(b bool) *bool {
 	return optimiser.BoolPtr(b)
 }

@@ -1317,9 +1317,23 @@ double CalculateCurrentStateCost(
 ) {
     // Build current assignments vector from pod current_md_assignment
     vector<BeamAssignment> current_assignments(num_pods);
+
+    // Track which pods are assigned to each MD for slot assignment
+    vector<vector<int>> pods_per_md(num_mds);
+
     for (int i = 0; i < num_pods; ++i) {
-        current_assignments[i].md = pods[i].current_md_assignment;
-        current_assignments[i].slot = -1; // We don't know the exact slot, but that's OK for cost calculation
+        const int current_md = pods[i].current_md_assignment;
+
+        // Validate current_md_assignment to avoid out-of-bounds access
+        if (current_md >= 0 && current_md < num_mds) {
+            current_assignments[i].md = current_md;
+            pods_per_md[current_md].push_back(i);
+        } else {
+            // Treat invalid assignments as unassigned (no current placement)
+            current_assignments[i].md = -1;
+        }
+        // We'll assign proper slots below after calculating nodes needed
+        current_assignments[i].slot = -1;
     }
 
     // Build current slots_used based on current pod assignments
@@ -1329,11 +1343,9 @@ double CalculateCurrentStateCost(
     for (int j = 0; j < num_mds; ++j) {
         // Calculate total resource usage for pods assigned to this MD
         double cpu_used = 0.0, mem_used = 0.0;
-        for (int i = 0; i < num_pods; ++i) {
-            if (pods[i].current_md_assignment == j) {
-                cpu_used += pods[i].cpu * 100.0;
-                mem_used += pods[i].memory * 100.0;
-            }
+        for (int pod_idx : pods_per_md[j]) {
+            cpu_used += pods[pod_idx].cpu * 100.0;
+            mem_used += pods[pod_idx].memory * 100.0;
         }
 
         // Calculate minimum number of nodes needed
@@ -1350,6 +1362,18 @@ double CalculateCurrentStateCost(
         // Mark the needed nodes as used
         for (int slot = 0; slot < nodes_needed && slot < mds[j].max_scale_out; ++slot) {
             current_slots_used[j][slot] = true;
+        }
+
+        // Distribute pods across slots to avoid soft affinity penalty issues
+        // We don't know the actual slot distribution, so spread pods evenly
+        // This gives a reasonable approximation for cost calculation
+        if (nodes_needed > 0 && !pods_per_md[j].empty()) {
+            int pods_per_node = (pods_per_md[j].size() + nodes_needed - 1) / nodes_needed;
+            for (size_t i = 0; i < pods_per_md[j].size(); ++i) {
+                int pod_idx = pods_per_md[j][i];
+                int slot = std::min(static_cast<int>(i / pods_per_node), nodes_needed - 1);
+                current_assignments[pod_idx].slot = slot;
+            }
         }
     }
 

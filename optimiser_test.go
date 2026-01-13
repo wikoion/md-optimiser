@@ -2,7 +2,9 @@ package optimiser_test
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -874,3 +876,43 @@ func TestCurrentStateCostSkipsUnassignedSoftAffinity(t *testing.T) {
 }
 
 // Helper functions are provided by optimiser.BoolPtr, optimiser.IntPtr, optimiser.FloatPtr
+
+// TestOptimisePlacementRaw_ReplicaCountOverflow tests that the function properly
+// validates that replica counts fit within int32 range before converting to C.int.
+func TestOptimisePlacementRaw_ReplicaCountOverflow(t *testing.T) {
+	// Create an MD with a replica count that exceeds math.MaxInt32
+	mds := []optimiser.MachineDeployment{
+		&mockMDWithReplicas{
+			name:        "test-md",
+			cpu:         8.0,
+			memory:      32.0,
+			maxScaleOut: 100,
+			replicas:    math.MaxInt32 + 1,
+		},
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{
+			cpu:    1.0,
+			memory: 1.0,
+			labels: map[string]string{},
+		},
+	}
+
+	scores := []float64{1.0}
+	allowed := []int{1}
+	initial := make([][][]int, 0)
+
+	config := &optimiser.OptimizationConfig{
+		ScoreOnly: optimiser.BoolPtr(true),
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+
+	// Expect failure due to overflow
+	assert.False(t, result.Succeeded, "Should fail when replica count exceeds int32 max")
+	assert.Contains(t, result.Message, "exceeds the maximum allowed value",
+		"Error message should mention the overflow")
+	assert.Contains(t, result.Message, strconv.Itoa(math.MaxInt32),
+		"Error message should mention math.MaxInt32")
+}

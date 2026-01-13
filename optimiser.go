@@ -164,6 +164,7 @@ SolverResult call_optimise_placement_beam_search(
 import "C"
 import (
 	"fmt"
+	"math"
 	"unsafe"
 )
 
@@ -653,6 +654,17 @@ func OptimisePlacementRaw(
 						"MachineDeployment %s returned negative replica count %d from GetOriginalReplicas() "+
 							"- replica counts must be non-negative. This is a programming error.",
 						md.GetName(), replicas),
+				}
+			}
+
+			// Validate that replica count fits within int32 range before converting to C.int
+			if replicas > math.MaxInt32 {
+				return Result{
+					Succeeded: false,
+					Message: fmt.Sprintf(
+						"MachineDeployment %s has replica count %d which exceeds the maximum allowed value of %d "+
+							"(int32 limit). Replica counts must fit within a 32-bit integer.",
+						md.GetName(), replicas, math.MaxInt32),
 				}
 			}
 

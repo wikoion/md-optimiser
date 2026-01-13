@@ -70,7 +70,8 @@ SolverResult call_optimise_placement_with_handle(
     const _Bool* use_beam_search_hint,
     const int* beam_search_hint_attempt,
     const _Bool* fallback_to_beam_search,
-    const _Bool* beam_search_only
+    const _Bool* beam_search_only,
+    const int* current_replicas
 ) {
     // Get the function pointer using dlsym with the specific handle
     void* sym = dlsym(lib_handle, "OptimisePlacement");
@@ -99,7 +100,8 @@ SolverResult call_optimise_placement_with_handle(
         const _Bool*,
         const int*,
         const _Bool*,
-        const _Bool*
+        const _Bool*,
+        const int*
     );
 
     OptimisePlacementFunc func = (OptimisePlacementFunc)sym;
@@ -109,7 +111,7 @@ SolverResult call_optimise_placement_with_handle(
                 allowed_matrix, initial_assignment, out_slot_assignments,
                 out_slots_used, max_runtime_secs, improvement_threshold, score_only,
                 max_attempts, use_beam_search_hint, beam_search_hint_attempt,
-                fallback_to_beam_search, beam_search_only);
+                fallback_to_beam_search, beam_search_only, current_replicas);
 }
 
 // C wrapper function for beam search optimization
@@ -616,6 +618,41 @@ func OptimisePlacementRaw(
 		defer C.free(unsafe.Pointer(cBeamSearchOnly))
 	}
 
+	// Build current replicas array from MachineDeployments
+	var cCurrentReplicas *C.int
+	if len(mds) > 0 {
+		// Allocate array for current replicas
+		cCurrentReplicas = (*C.int)(C.malloc(C.size_t(len(mds)) * C.size_t(unsafe.Sizeof(C.int(0)))))
+		defer C.free(unsafe.Pointer(cCurrentReplicas))
+
+		// Convert to slice for easier access
+		replicasSlice := (*[1 << 30]C.int)(unsafe.Pointer(cCurrentReplicas))[:len(mds):len(mds)]
+
+		// Populate with actual replica counts from each MD
+		for i, md := range mds {
+			// Try to get original replicas if the MD supports it (optional method)
+			type replicaGetter interface {
+				GetOriginalReplicas() (int64, bool)
+			}
+
+			if rg, ok := md.(replicaGetter); ok {
+				if replicas, found := rg.GetOriginalReplicas(); found {
+					replicasSlice[i] = C.int(replicas)
+					continue
+				}
+			}
+
+			// FAIL if we don't have actual replica counts - this is a programming error
+			// We should never infer node counts from pod resources for current state calculation
+			return Result{
+				Message: fmt.Sprintf(
+					"MachineDeployment %s does not provide GetOriginalReplicas() "+
+						"- cannot calculate current state cost accurately. This is a programming error.",
+					md.GetName()),
+			}
+		}
+	}
+
 	res := C.call_optimise_placement_with_handle(
 		GetLibHandle(),
 		(*C.MachineDeployment)(unsafe.Pointer(&cMDs[0])), C.int(numMDs),
@@ -623,7 +660,7 @@ func OptimisePlacementRaw(
 		cScores, cAllowed, cHints, outAssign, outSlots, cMaxRuntime,
 		cImprovementThreshold, cScoreOnly,
 		cMaxAttempts, cUseBeamSearchHint, cBeamSearchHintAttempt,
-		cFallbackToBeamSearch, cBeamSearchOnly,
+		cFallbackToBeamSearch, cBeamSearchOnly, cCurrentReplicas,
 	)
 
 	return parseResults(res, outAssign, outSlots, numPods, slotsPerMD, outSlotsUsedCount)

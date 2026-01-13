@@ -34,6 +34,12 @@ func (md *MD) GetMaxScaleOut() int {
 	return md.MaxScaleOut
 }
 
+func (md *MD) GetOriginalReplicas() (int64, bool) {
+	// For the example, we don't track current replicas, so return false
+	// In a real implementation, this would return the actual number of nodes currently running
+	return 0, false
+}
+
 // Pod represents a container workload with resource demands and labels.
 // Labels may be used to apply placement constraints like hardware preferences.
 type Pod struct {

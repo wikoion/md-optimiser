@@ -176,6 +176,7 @@ type MachineDeployment interface {
 	GetCPU() float64
 	GetMemory() float64
 	GetMaxScaleOut() int
+	GetOriginalReplicas() (int64, bool)
 }
 
 type Pod interface {
@@ -630,26 +631,32 @@ func OptimisePlacementRaw(
 
 		// Populate with actual replica counts from each MD
 		for i, md := range mds {
-			// Try to get original replicas if the MD supports it (optional method)
-			type replicaGetter interface {
-				GetOriginalReplicas() (int64, bool)
-			}
-
-			if rg, ok := md.(replicaGetter); ok {
-				if replicas, found := rg.GetOriginalReplicas(); found {
-					replicasSlice[i] = C.int(replicas)
-					continue
+			// Get original replicas from the MD (now required by interface)
+			replicas, found := md.GetOriginalReplicas()
+			if !found {
+				// FAIL if we don't have actual replica counts - this is a programming error
+				// We should never infer node counts from pod resources for current state calculation
+				return Result{
+					Succeeded: false,
+					Message: fmt.Sprintf(
+						"MachineDeployment %s does not provide GetOriginalReplicas() "+
+							"- cannot calculate current state cost accurately. This is a programming error.",
+						md.GetName()),
 				}
 			}
 
-			// FAIL if we don't have actual replica counts - this is a programming error
-			// We should never infer node counts from pod resources for current state calculation
-			return Result{
-				Message: fmt.Sprintf(
-					"MachineDeployment %s does not provide GetOriginalReplicas() "+
-						"- cannot calculate current state cost accurately. This is a programming error.",
-					md.GetName()),
+			// Validate that replica count is non-negative
+			if replicas < 0 {
+				return Result{
+					Succeeded: false,
+					Message: fmt.Sprintf(
+						"MachineDeployment %s returned negative replica count %d from GetOriginalReplicas() "+
+							"- replica counts must be non-negative. This is a programming error.",
+						md.GetName(), replicas),
+				}
 			}
+
+			replicasSlice[i] = C.int(replicas)
 		}
 	}
 

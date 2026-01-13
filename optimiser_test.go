@@ -2,7 +2,9 @@ package optimiser_test
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -885,7 +887,7 @@ func TestOptimisePlacementRaw_ReplicaCountOverflow(t *testing.T) {
 			cpu:         8.0,
 			memory:      32.0,
 			maxScaleOut: 100,
-			replicas:    int64(2147483648), // math.MaxInt32 + 1
+			replicas:    math.MaxInt32 + 1,
 		},
 	}
 
@@ -911,7 +913,7 @@ func TestOptimisePlacementRaw_ReplicaCountOverflow(t *testing.T) {
 	assert.False(t, result.Succeeded, "Should fail when replica count exceeds int32 max")
 	assert.Contains(t, result.Message, "exceeds the maximum allowed value",
 		"Error message should mention the overflow")
-	assert.Contains(t, result.Message, "2147483647",
+	assert.Contains(t, result.Message, strconv.Itoa(math.MaxInt32),
 		"Error message should mention math.MaxInt32")
 }
 

@@ -9,17 +9,31 @@ import (
 	optimiser "github.com/wikoion/md-optimiser"
 )
 
-type mockMD struct {
+// mockMDWithReplicas is a mock MachineDeployment that provides actual replica count
+type mockMDWithReplicas struct {
 	name        string
 	cpu         float64
 	memory      float64
 	maxScaleOut int
+	replicas    int64
 }
 
-func (m *mockMD) GetName() string     { return m.name }
-func (m *mockMD) GetCPU() float64     { return m.cpu }
-func (m *mockMD) GetMemory() float64  { return m.memory }
-func (m *mockMD) GetMaxScaleOut() int { return m.maxScaleOut }
+func (m *mockMDWithReplicas) GetName() string                    { return m.name }
+func (m *mockMDWithReplicas) GetCPU() float64                    { return m.cpu }
+func (m *mockMDWithReplicas) GetMemory() float64                 { return m.memory }
+func (m *mockMDWithReplicas) GetMaxScaleOut() int                { return m.maxScaleOut }
+func (m *mockMDWithReplicas) GetOriginalReplicas() (int64, bool) { return m.replicas, true }
+
+// Helper to create a mockMDWithReplicas with replicas defaulting to maxScaleOut
+func newMockMD(name string, cpu, memory float64, maxScaleOut int) *mockMDWithReplicas {
+	return &mockMDWithReplicas{
+		name:        name,
+		cpu:         cpu,
+		memory:      memory,
+		maxScaleOut: maxScaleOut,
+		replicas:    int64(maxScaleOut), // Default: assume all slots filled
+	}
+}
 
 type mockPod struct {
 	cpu, memory        float64
@@ -57,12 +71,8 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 
 	// Create 6 MDs with increasing resources and plugin scores
 	for i := 1; i <= 6; i++ {
-		mds = append(mds, &mockMD{
-			name:        fmt.Sprintf("md-%d", i),
-			cpu:         float64(i), // 1.0 vCPU to 6.0 vCPU
-			memory:      float64(i), // 1 to 6 GiB
-			maxScaleOut: 10,
-		})
+		md := newMockMD(fmt.Sprintf("md-%d", i), float64(i), float64(i), 10)
+		mds = append(mds, md)
 		scores = append(scores, float64(i)/6.0) // Normalized score
 	}
 
@@ -134,9 +144,9 @@ func TestOptimisePlacementRaw_PrefersLargestMD(t *testing.T) {
 
 func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-a", cpu: 16, memory: 64, maxScaleOut: 2},
-		&mockMD{name: "md-b", cpu: 8, memory: 32, maxScaleOut: 2},
-		&mockMD{name: "md-c", cpu: 4, memory: 16, maxScaleOut: 3},
+		newMockMD("md-a", 16, 64, 2),
+		newMockMD("md-b", 8, 32, 2),
+		newMockMD("md-c", 4, 16, 3),
 	}
 
 	pods := []optimiser.Pod{
@@ -175,7 +185,7 @@ func TestOptimisePlacementRaw_NoAffinity(t *testing.T) {
 
 func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-large", cpu: 16, memory: 64, maxScaleOut: 2},
+		newMockMD("md-large", 16, 64, 2),
 	}
 
 	pods := []optimiser.Pod{
@@ -204,7 +214,7 @@ func TestOptimisePlacementRaw_SmallFeasible(t *testing.T) {
 
 func TestOptimisePlacementRaw_IncompatiblePodFails(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-tiny", cpu: 1, memory: 1, maxScaleOut: 1},
+		newMockMD("md-tiny", 1, 1, 1),
 	}
 
 	pods := []optimiser.Pod{
@@ -236,7 +246,7 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 	// 1 MD with 3 slots, 3 pods with mutual anti-affinity
 	// This should be feasible - each pod gets its own slot
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-large", cpu: 16, memory: 64, maxScaleOut: 3},
+		newMockMD("md-large", 16, 64, 3),
 	}
 
 	pods := []optimiser.Pod{
@@ -311,9 +321,9 @@ func TestOptimisePlacementRaw_AntiAffinityThreePodsThreeSlots(t *testing.T) {
 func TestOptimisePlacementRaw_ScoreOnlyMode(t *testing.T) {
 	// Create test MDs and pods with current assignments
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-a", cpu: 16, memory: 64, maxScaleOut: 2},
-		&mockMD{name: "md-b", cpu: 8, memory: 32, maxScaleOut: 2},
-		&mockMD{name: "md-c", cpu: 4, memory: 16, maxScaleOut: 3},
+		newMockMD("md-a", 16, 64, 2),
+		newMockMD("md-b", 8, 32, 2),
+		newMockMD("md-c", 4, 16, 3),
 	}
 
 	pods := []optimiser.Pod{
@@ -396,8 +406,8 @@ func TestOptimisePlacementRaw_ScoreOnlyMode(t *testing.T) {
 func TestOptimisePlacementRaw_BeamSearchOnly(t *testing.T) {
 	// Create simple test scenario
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
-		&mockMD{name: "md-2", cpu: 2.0, memory: 4.0, maxScaleOut: 5},
+		newMockMD("md-1", 4.0, 8.0, 5),
+		newMockMD("md-2", 2.0, 4.0, 5),
 	}
 
 	pods := []optimiser.Pod{
@@ -440,8 +450,8 @@ func TestOptimisePlacementRaw_BeamSearchOnly(t *testing.T) {
 func TestOptimisePlacementRaw_BeamSearchHint(t *testing.T) {
 	// Create test scenario where beam search hint should help
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
-		&mockMD{name: "md-2", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		newMockMD("md-1", 4.0, 8.0, 5),
+		newMockMD("md-2", 4.0, 8.0, 5),
 	}
 
 	pods := []optimiser.Pod{
@@ -486,8 +496,8 @@ func TestOptimisePlacementRaw_BeamSearchHint(t *testing.T) {
 func TestOptimisePlacementRaw_BeamSearchFallback(t *testing.T) {
 	// Create a difficult scenario that might challenge CP-SAT
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-1", cpu: 2.0, memory: 4.0, maxScaleOut: 3},
-		&mockMD{name: "md-2", cpu: 2.0, memory: 4.0, maxScaleOut: 3},
+		newMockMD("md-1", 2.0, 4.0, 3),
+		newMockMD("md-2", 2.0, 4.0, 3),
 	}
 
 	pods := []optimiser.Pod{
@@ -531,8 +541,8 @@ func TestOptimisePlacementRaw_BeamSearchFallback(t *testing.T) {
 func TestOptimisePlacementRaw_MultipleAttempts(t *testing.T) {
 	// Test that multiple attempts work correctly
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
-		&mockMD{name: "md-2", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		newMockMD("md-1", 4.0, 8.0, 5),
+		newMockMD("md-2", 4.0, 8.0, 5),
 	}
 
 	pods := []optimiser.Pod{
@@ -574,7 +584,7 @@ func TestOptimisePlacementRaw_MultipleAttempts(t *testing.T) {
 func TestOptimisePlacementRaw_BackwardCompatibility(t *testing.T) {
 	// Test that nil config works as before (backward compatibility)
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		newMockMD("md-1", 4.0, 8.0, 5),
 	}
 
 	pods := []optimiser.Pod{
@@ -607,7 +617,7 @@ func TestOptimisePlacementRaw_BackwardCompatibility(t *testing.T) {
 func TestOptimisePlacement_DeprecatedAPI(t *testing.T) {
 	// Test the deprecated wrapper function for backward compatibility
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		newMockMD("md-1", 4.0, 8.0, 5),
 	}
 
 	pods := []optimiser.Pod{
@@ -636,7 +646,7 @@ func TestOptimisePlacement_DeprecatedAPI(t *testing.T) {
 func TestOptimisePlacementRaw_ImprovementThreshold(t *testing.T) {
 	// Test that improvement threshold is respected
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "md-1", cpu: 4.0, memory: 8.0, maxScaleOut: 5},
+		newMockMD("md-1", 4.0, 8.0, 5),
 	}
 
 	// Create pods with current assignments
@@ -671,21 +681,27 @@ func TestOptimisePlacementRaw_ImprovementThreshold(t *testing.T) {
 	}
 }
 
-// TestCurrentStateCostWithMultipleNodes tests that current state cost is calculated
-// correctly when multiple nodes of the same MD type are running.
-// This reproduces the bug where CalculateCurrentStateCost assumed 1 node per MD.
-func TestCurrentStateCostWithMultipleNodes(t *testing.T) {
-	// Simulate Tado-like scenario: 4x m6id.2xlarge nodes with pods distributed across them
+// TestCurrentStateCostWithActualReplicas tests that current state cost is calculated
+// using ACTUAL replica counts, not inferred from pod resources.
+// This validates the fix where we pass actual node counts to CalculateCurrentStateCost.
+func TestCurrentStateCostWithActualReplicas(t *testing.T) {
+	// Simulate wasteful cluster scenario: 10 nodes running, but pods only need 2 nodes
 	// Each m6id.2xlarge has 8 CPU and 32 GB memory
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "m6id.2xlarge", cpu: 8.0, memory: 32.0, maxScaleOut: 10},
+		&mockMDWithReplicas{
+			name:        "m6id.2xlarge",
+			cpu:         8.0,
+			memory:      32.0,
+			maxScaleOut: 10,
+			replicas:    10, // ACTUAL: 10 nodes running
+		},
 	}
 
-	// Create 16 pods that require approximately 4 nodes worth of resources
+	// Create 4 pods that only need 2 nodes worth of resources
 	// Each pod: 2 CPU, 8 GB memory
-	// Total: 32 CPU, 128 GB = minimum 4 nodes of m6id.2xlarge needed
-	pods := make([]optimiser.Pod, 16)
-	for i := 0; i < 16; i++ {
+	// Total: 8 CPU, 32 GB = minimum 2 nodes needed (but 10 are actually running!)
+	pods := make([]optimiser.Pod, 4)
+	for i := 0; i < 4; i++ {
 		pods[i] = &mockPodWithAssignment{
 			cpu:                 2.0,
 			memory:              8.0,
@@ -695,7 +711,7 @@ func TestCurrentStateCostWithMultipleNodes(t *testing.T) {
 	}
 
 	scores := []float64{1.0}
-	allowed := make([]int, 16)
+	allowed := make([]int, 4)
 	for i := range allowed {
 		allowed[i] = 1 // All pods can go to MD 0
 	}
@@ -710,18 +726,18 @@ func TestCurrentStateCostWithMultipleNodes(t *testing.T) {
 
 	assert.True(t, result.Succeeded, "Score-only mode should succeed")
 
-	// Calculate expected cost manually:
-	// - 4 nodes needed (ceil(32 CPU / 8 per node) = 4, ceil(128 GB / 32 per node) = 4)
+	// Calculate expected cost with ACTUAL 10 nodes (not the 2 needed):
+	// - 10 actual nodes running
 	// - Each node provisions: 8 CPU * 100 + 32 GB * 100 = 800 + 3200 = 4000 units
-	// - Total provisioned: 4 nodes * 4000 = 16000 units
-	// - Total used: 32 CPU * 100 + 128 GB * 100 = 3200 + 12800 = 16000 units
-	// - Waste: 16000 - 16000 = 0 units (perfect fit!)
-	// - Plugin cost: 4 nodes * ((1.0 - 1.0) * 1000 + 1) = 4 nodes * 1 = 4
-	// - Total cost: (0 * 1000) + (4 * 1000) + 0 = 4000
-	expectedCost := 4000.0
+	// - Total provisioned: 10 nodes * 4000 = 40000 units
+	// - Total used by pods: 8 CPU * 100 + 32 GB * 100 = 800 + 3200 = 4000 units
+	// - Waste: 40000 - 4000 = 36000 units
+	// - Plugin cost: 10 nodes * ((1.0 - 1.0) * 1000 + 1) = 10 nodes * 1 = 10
+	// - Total cost: (36000 * 1000) + (10 * 1000) + 0 = 36,000,000 + 10,000 = 36,010,000
+	expectedCost := 36010000.0
 
 	assert.Equal(t, expectedCost, result.CurrentStateCost,
-		"Current state cost should account for all 4 nodes needed")
+		"Current state cost should account for all 10 nodes actually running")
 	assert.Equal(t, expectedCost, result.Objective,
 		"In score-only mode, objective should equal current state cost")
 
@@ -733,8 +749,8 @@ func TestCurrentStateCostWithMultipleNodes(t *testing.T) {
 func TestCurrentStateCostAccuracy(t *testing.T) {
 	// Create a scenario where current placement is optimal
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "small", cpu: 2.0, memory: 8.0, maxScaleOut: 5},
-		&mockMD{name: "large", cpu: 8.0, memory: 32.0, maxScaleOut: 5},
+		newMockMD("small", 2.0, 8.0, 5),
+		newMockMD("large", 8.0, 32.0, 5),
 	}
 
 	// 3 pods that fit perfectly on 1 large node
@@ -787,7 +803,13 @@ func TestCurrentStateCostAccuracy(t *testing.T) {
 
 func TestCurrentStateCostExceedsMaxScaleOut(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "tiny", cpu: 2.0, memory: 2.0, maxScaleOut: 1},
+		&mockMDWithReplicas{
+			name:        "tiny",
+			cpu:         2.0,
+			memory:      2.0,
+			maxScaleOut: 1,
+			replicas:    2, // Actually running 2 nodes
+		},
 	}
 
 	pods := []optimiser.Pod{
@@ -805,14 +827,20 @@ func TestCurrentStateCostExceedsMaxScaleOut(t *testing.T) {
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 	assert.True(t, result.Succeeded)
 
-	// 2 nodes needed even though maxScaleOut is 1; cost should not go negative.
+	// 2 nodes actually running; cost should be calculated based on actual node count.
 	expectedCost := 2000.0
 	assert.Equal(t, expectedCost, result.CurrentStateCost)
 }
 
 func TestCurrentStateCostSkipsUnassignedSoftAffinity(t *testing.T) {
 	mds := []optimiser.MachineDeployment{
-		&mockMD{name: "small", cpu: 2.0, memory: 2.0, maxScaleOut: 1},
+		&mockMDWithReplicas{
+			name:        "small",
+			cpu:         2.0,
+			memory:      2.0,
+			maxScaleOut: 1,
+			replicas:    0, // No nodes currently running
+		},
 	}
 
 	pods := []optimiser.Pod{
@@ -841,6 +869,7 @@ func TestCurrentStateCostSkipsUnassignedSoftAffinity(t *testing.T) {
 	}
 	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
 	assert.True(t, result.Succeeded)
+	// No nodes running, so current state cost should be 0
 	assert.Equal(t, 0.0, result.CurrentStateCost)
 }
 

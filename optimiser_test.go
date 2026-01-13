@@ -916,4 +916,3 @@ func TestOptimisePlacementRaw_ReplicaCountOverflow(t *testing.T) {
 	assert.Contains(t, result.Message, strconv.Itoa(math.MaxInt32),
 		"Error message should mention math.MaxInt32")
 }
-

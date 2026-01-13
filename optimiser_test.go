@@ -737,7 +737,7 @@ func TestCurrentStateCostWithActualReplicas(t *testing.T) {
 	expectedCost := 36010000.0
 
 	assert.Equal(t, expectedCost, result.CurrentStateCost,
-		"Current state cost should account for all 4 nodes needed")
+		"Current state cost should account for all 10 nodes actually running")
 	assert.Equal(t, expectedCost, result.Objective,
 		"In score-only mode, objective should equal current state cost")
 

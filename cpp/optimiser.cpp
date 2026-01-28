@@ -49,6 +49,16 @@ struct Pod {
     int current_md_assignment; // Index of MD this pod is currently placed on (-1 if unknown)
 };
 
+struct TopologyGroup {
+    int max_skew;
+    int min_domains;
+    int num_domains;
+    const int* baseline_counts;
+    const int* pods_in_group;
+    const int* slot_domains;
+    int is_hard;
+};
+
 enum SolverStatus {
     UNKNOWN = 0,
     MODEL_INVALID = 1,
@@ -322,6 +332,7 @@ double CalculateSoftAffinityPenalty(
     return penalty;
 }
 
+
 // Helper: Count valid placements for a pod (for difficulty scoring)
 int CountValidPlacements(int pod_idx, const int* allowed_matrix, int num_mds) {
     int count = 0;
@@ -461,130 +472,6 @@ vector<vector<int>> BuildAffinityGroups(const Pod* pods, int num_pods) {
     return groups;
 }
 
-// Helper: Try to place affinity group together
-bool TryPlaceAffinityGroup(
-    const vector<int>& group,
-    const vector<int>& md_order,
-    const MachineDeployment* mds,
-    const Pod* pods,
-    const int* allowed_matrix,
-    int num_mds,
-    vector<vector<SlotState>>& slot_usage,
-    vector<BeamAssignment>& assignments
-) {
-    // Calculate total resources needed for group
-    double total_cpu = 0.0;
-    double total_mem = 0.0;
-    for (int pod_idx : group) {
-        total_cpu += pods[pod_idx].cpu;
-        total_mem += pods[pod_idx].memory;
-    }
-
-    // PHASE 1: CLUSTER AUTOSCALER STRATEGY - Try ALL existing (used) slots first
-    // This is the key fix: prefer packing into existing nodes before creating new ones
-    int best_md = -1;
-    int best_slot = -1;
-    double best_score = -std::numeric_limits<double>::infinity();
-
-    for (int md_idx = 0; md_idx < num_mds; ++md_idx) {
-        const MachineDeployment& md = mds[md_idx];
-
-        // Check if all pods in group are allowed on this MD
-        bool all_allowed = true;
-        for (int pod_idx : group) {
-            if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
-                all_allowed = false;
-                break;
-            }
-        }
-        if (!all_allowed) continue;
-
-        // Try all EXISTING (used) slots in this MD
-        for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
-            if (!slot_usage[md_idx][slot_idx].used) {
-                continue;  // Skip empty slots in Phase 1
-            }
-
-            // Check if group fits in remaining capacity
-            if (total_cpu <= slot_usage[md_idx][slot_idx].cpu_remaining &&
-                total_mem <= slot_usage[md_idx][slot_idx].mem_remaining) {
-
-                // Score this placement - PREFER FULLER NODES (like Cluster Autoscaler)
-                double remaining_cpu = slot_usage[md_idx][slot_idx].cpu_remaining - total_cpu;
-                double remaining_mem = slot_usage[md_idx][slot_idx].mem_remaining - total_mem;
-
-                // Calculate utilization after placing group
-                double cpu_used_pct = 1.0 - (remaining_cpu / md.cpu);
-                double mem_used_pct = 1.0 - (remaining_mem / md.memory);
-                double avg_utilization = (cpu_used_pct + mem_used_pct) / 2.0;
-
-                // Higher score = better fit (fuller node)
-                double score = avg_utilization * 10000.0;  // 0-10000 range
-
-                // Small bonus for better plugin scores (but utilization dominates)
-                score += (md_idx < static_cast<int>(md_order.size()) ?
-                         (1000.0 / (1.0 + md_order[md_idx])) : 0.0);
-
-                if (score > best_score) {
-                    best_score = score;
-                    best_md = md_idx;
-                    best_slot = slot_idx;
-                }
-            }
-        }
-    }
-
-    // If we found an existing slot with capacity, use it
-    if (best_md != -1) {
-        for (int pod_idx : group) {
-            assignments[pod_idx] = {best_md, best_slot};
-        }
-        slot_usage[best_md][best_slot].cpu_remaining -= total_cpu;
-        slot_usage[best_md][best_slot].mem_remaining -= total_mem;
-        return true;
-    }
-
-    // PHASE 2: No existing slot found - create new node
-    // Try MDs in preferred order
-    for (int md_idx : md_order) {
-        const MachineDeployment& md = mds[md_idx];
-
-        // Check if all pods in group are allowed on this MD
-        bool all_allowed = true;
-        for (int pod_idx : group) {
-            if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
-                all_allowed = false;
-                break;
-            }
-        }
-        if (!all_allowed) continue;
-
-        // Check if group fits in MD capacity
-        if (total_cpu > md.cpu || total_mem > md.memory) {
-            continue;
-        }
-
-        // Find first empty slot in this MD
-        for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
-            if (slot_usage[md_idx][slot_idx].used) {
-                continue;  // Skip used slots in Phase 2
-            }
-
-            // Found empty slot - create new node here
-            for (int pod_idx : group) {
-                assignments[pod_idx] = {md_idx, slot_idx};
-            }
-
-            slot_usage[md_idx][slot_idx].used = true;
-            slot_usage[md_idx][slot_idx].cpu_remaining -= total_cpu;
-            slot_usage[md_idx][slot_idx].mem_remaining -= total_mem;
-
-            return true;
-        }
-    }
-
-    return false;
-}
 
 // Main beam search placement algorithm result
 struct BeamResult {
@@ -729,11 +616,13 @@ struct SearchState {
     double waste_score;
     int nodes_used;
     int pods_placed;
+    vector<vector<int>> domain_counts;
 
     // Default constructor (needed for vector::resize)
     SearchState() : waste_score(0.0), nodes_used(0), pods_placed(0) {}
 
-    SearchState(int num_pods, int num_mds, const MachineDeployment* mds)
+    SearchState(int num_pods, int num_mds, const MachineDeployment* mds,
+                const TopologyGroup* topology_groups, int num_topology_groups)
         : assignments(num_pods, {-1, -1}),
           slot_usage(num_mds),
           waste_score(0.0),
@@ -743,6 +632,18 @@ struct SearchState {
             slot_usage[i].resize(mds[i].max_scale_out);
             for (int j = 0; j < mds[i].max_scale_out; ++j) {
                 slot_usage[i][j] = {false, mds[i].cpu, mds[i].memory};
+            }
+        }
+
+        if (topology_groups != nullptr && num_topology_groups > 0) {
+            domain_counts.resize(num_topology_groups);
+            for (int g = 0; g < num_topology_groups; ++g) {
+                domain_counts[g].resize(topology_groups[g].num_domains, 0);
+                for (int d = 0; d < topology_groups[g].num_domains; ++d) {
+                    domain_counts[g][d] = topology_groups[g].baseline_counts != nullptr
+                        ? topology_groups[g].baseline_counts[d]
+                        : 0;
+                }
             }
         }
     }
@@ -781,6 +682,338 @@ struct SearchState {
         return total_waste;
     }
 };
+
+int CountDomainsWithPods(const vector<int>& counts) {
+    int used = 0;
+    for (int count : counts) {
+        if (count > 0) {
+            used++;
+        }
+    }
+    return used;
+}
+
+int MinCount(const vector<int>& counts) {
+    if (counts.empty()) {
+        return 0;
+    }
+    int min_val = counts[0];
+    for (int count : counts) {
+        min_val = std::min(min_val, count);
+    }
+    return min_val;
+}
+
+int MaxCount(const vector<int>& counts) {
+    if (counts.empty()) {
+        return 0;
+    }
+    int max_val = counts[0];
+    for (int count : counts) {
+        max_val = std::max(max_val, count);
+    }
+    return max_val;
+}
+
+double CalculateTopologySoftPenaltyFromCounts(
+    const vector<int>& counts,
+    const TopologyGroup& group
+) {
+    if (group.is_hard || counts.empty()) {
+        return 0.0;
+    }
+
+    int max_count = MaxCount(counts);
+    int min_count = MinCount(counts);
+    int used_domains = CountDomainsWithPods(counts);
+
+    int skew_violation = std::max(0, max_count - min_count - group.max_skew);
+    int min_domain_violation = std::max(0, group.min_domains - used_domains);
+
+    return static_cast<double>(skew_violation + min_domain_violation) * 1000.0;
+}
+
+double CalculateTopologySoftPenalty(const SearchState& state,
+                                    const TopologyGroup* topology_groups,
+                                    int num_topology_groups) {
+    if (topology_groups == nullptr || num_topology_groups == 0) {
+        return 0.0;
+    }
+
+    double penalty = 0.0;
+    for (int g = 0; g < num_topology_groups; ++g) {
+        const TopologyGroup& group = topology_groups[g];
+        if (group.is_hard) {
+            continue;
+        }
+        if (g >= static_cast<int>(state.domain_counts.size())) {
+            continue;
+        }
+        penalty += CalculateTopologySoftPenaltyFromCounts(state.domain_counts[g], group);
+    }
+
+    return penalty;
+}
+
+bool CanPlaceWithTopology(
+    const SearchState& state,
+    int pod_idx,
+    int md_idx,
+    int slot_idx,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups,
+    const vector<int>& slot_offsets
+) {
+    if (topology_groups == nullptr || num_topology_groups == 0) {
+        return true;
+    }
+
+    int slot_index = slot_offsets[md_idx] + slot_idx;
+    for (int g = 0; g < num_topology_groups; ++g) {
+        const TopologyGroup& group = topology_groups[g];
+        if (group.pods_in_group == nullptr || !group.pods_in_group[pod_idx]) {
+            continue;
+        }
+        if (group.slot_domains == nullptr || group.num_domains <= 0) {
+            continue;
+        }
+        int domain = group.slot_domains[slot_index];
+        if (domain < 0 || domain >= group.num_domains) {
+            continue;
+        }
+
+        vector<int> updated = state.domain_counts[g];
+        updated[domain]++;
+
+        if (group.is_hard) {
+            if (MaxCount(updated) - MinCount(updated) > group.max_skew) {
+                return false;
+            }
+            if (CountDomainsWithPods(updated) < group.min_domains) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+void ApplyTopologyPlacement(
+    SearchState& state,
+    int pod_idx,
+    int md_idx,
+    int slot_idx,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups,
+    const vector<int>& slot_offsets
+) {
+    if (topology_groups == nullptr || num_topology_groups == 0) {
+        return;
+    }
+
+    int slot_index = slot_offsets[md_idx] + slot_idx;
+    for (int g = 0; g < num_topology_groups; ++g) {
+        const TopologyGroup& group = topology_groups[g];
+        if (group.pods_in_group == nullptr || !group.pods_in_group[pod_idx]) {
+            continue;
+        }
+        if (group.slot_domains == nullptr || group.num_domains <= 0) {
+            continue;
+        }
+        int domain = group.slot_domains[slot_index];
+        if (domain < 0 || domain >= group.num_domains) {
+            continue;
+        }
+        state.domain_counts[g][domain]++;
+    }
+}
+
+bool CanPlaceAffinityGroupWithTopology(
+    const SearchState& state,
+    const vector<int>& group,
+    int md_idx,
+    int slot_idx,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups,
+    const vector<int>& slot_offsets
+) {
+    if (topology_groups == nullptr || num_topology_groups == 0) {
+        return true;
+    }
+
+    vector<vector<int>> counts = state.domain_counts;
+    int slot_index = slot_offsets[md_idx] + slot_idx;
+
+    for (int pod_idx : group) {
+        for (int g = 0; g < num_topology_groups; ++g) {
+            const TopologyGroup& groupSpec = topology_groups[g];
+            if (groupSpec.pods_in_group == nullptr || !groupSpec.pods_in_group[pod_idx]) {
+                continue;
+            }
+            if (groupSpec.slot_domains == nullptr || groupSpec.num_domains <= 0) {
+                continue;
+            }
+            int domain = groupSpec.slot_domains[slot_index];
+            if (domain < 0 || domain >= groupSpec.num_domains) {
+                continue;
+            }
+
+            counts[g][domain]++;
+
+            if (groupSpec.is_hard) {
+                if (MaxCount(counts[g]) - MinCount(counts[g]) > groupSpec.max_skew) {
+                    return false;
+                }
+                if (CountDomainsWithPods(counts[g]) < groupSpec.min_domains) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+// Helper: Try to place affinity group together
+bool TryPlaceAffinityGroup(
+    const vector<int>& group,
+    const vector<int>& md_order,
+    const MachineDeployment* mds,
+    const Pod* pods,
+    const int* allowed_matrix,
+    int num_mds,
+    SearchState& state,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups,
+    const vector<int>& slot_offsets
+) {
+    // Calculate total resources needed for group
+    double total_cpu = 0.0;
+    double total_mem = 0.0;
+    for (int pod_idx : group) {
+        total_cpu += pods[pod_idx].cpu;
+        total_mem += pods[pod_idx].memory;
+    }
+
+    // PHASE 1: CLUSTER AUTOSCALER STRATEGY - Try ALL existing (used) slots first
+    // This is the key fix: prefer packing into existing nodes before creating new ones
+    int best_md = -1;
+    int best_slot = -1;
+    double best_score = -std::numeric_limits<double>::infinity();
+
+    for (int md_idx = 0; md_idx < num_mds; ++md_idx) {
+        const MachineDeployment& md = mds[md_idx];
+
+        // Check if all pods in group are allowed on this MD
+        bool all_allowed = true;
+        for (int pod_idx : group) {
+            if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
+                all_allowed = false;
+                break;
+            }
+        }
+        if (!all_allowed) continue;
+
+        // Try all EXISTING (used) slots in this MD
+        for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
+            if (!state.slot_usage[md_idx][slot_idx].used) {
+                continue;  // Skip empty slots in Phase 1
+            }
+
+            // Check if group fits in remaining capacity
+            if (total_cpu <= state.slot_usage[md_idx][slot_idx].cpu_remaining &&
+                total_mem <= state.slot_usage[md_idx][slot_idx].mem_remaining) {
+
+                if (!CanPlaceAffinityGroupWithTopology(state, group, md_idx, slot_idx,
+                    topology_groups, num_topology_groups, slot_offsets)) {
+                    continue;
+                }
+
+                // Score this placement - PREFER FULLER NODES (like Cluster Autoscaler)
+                double remaining_cpu = state.slot_usage[md_idx][slot_idx].cpu_remaining - total_cpu;
+                double remaining_mem = state.slot_usage[md_idx][slot_idx].mem_remaining - total_mem;
+
+                // Calculate utilization after placing group
+                double cpu_used_pct = 1.0 - (remaining_cpu / md.cpu);
+                double mem_used_pct = 1.0 - (remaining_mem / md.memory);
+                double avg_utilization = (cpu_used_pct + mem_used_pct) / 2.0;
+
+                // Higher score = better fit (fuller node)
+                double score = avg_utilization * 10000.0;  // 0-10000 range
+
+                // Small bonus for better plugin scores (but utilization dominates)
+                score += (md_idx < static_cast<int>(md_order.size()) ?
+                         (1000.0 / (1.0 + md_order[md_idx])) : 0.0);
+
+                if (score > best_score) {
+                    best_score = score;
+                    best_md = md_idx;
+                    best_slot = slot_idx;
+                }
+            }
+        }
+    }
+
+    // If we found an existing slot with capacity, use it
+    if (best_md != -1) {
+        for (int pod_idx : group) {
+            state.assignments[pod_idx] = {best_md, best_slot};
+            ApplyTopologyPlacement(state, pod_idx, best_md, best_slot,
+                topology_groups, num_topology_groups, slot_offsets);
+        }
+        state.slot_usage[best_md][best_slot].cpu_remaining -= total_cpu;
+        state.slot_usage[best_md][best_slot].mem_remaining -= total_mem;
+        return true;
+    }
+
+    // PHASE 2: No existing slot found - create new node
+    // Try MDs in preferred order
+    for (int md_idx : md_order) {
+        const MachineDeployment& md = mds[md_idx];
+
+        // Check if all pods in group are allowed on this MD
+        bool all_allowed = true;
+        for (int pod_idx : group) {
+            if (!allowed_matrix[pod_idx * num_mds + md_idx]) {
+                all_allowed = false;
+                break;
+            }
+        }
+        if (!all_allowed) continue;
+
+        // Check if group fits in MD capacity
+        if (total_cpu > md.cpu || total_mem > md.memory) {
+            continue;
+        }
+
+        // Find first empty slot in this MD
+        for (int slot_idx = 0; slot_idx < md.max_scale_out; ++slot_idx) {
+            if (state.slot_usage[md_idx][slot_idx].used) {
+                continue;  // Skip used slots in Phase 2
+            }
+
+            if (!CanPlaceAffinityGroupWithTopology(state, group, md_idx, slot_idx,
+                topology_groups, num_topology_groups, slot_offsets)) {
+                continue;
+            }
+
+            // Found empty slot - create new node here
+            for (int pod_idx : group) {
+                state.assignments[pod_idx] = {md_idx, slot_idx};
+                ApplyTopologyPlacement(state, pod_idx, md_idx, slot_idx,
+                    topology_groups, num_topology_groups, slot_offsets);
+            }
+
+            state.slot_usage[md_idx][slot_idx].used = true;
+            state.slot_usage[md_idx][slot_idx].cpu_remaining -= total_cpu;
+            state.slot_usage[md_idx][slot_idx].mem_remaining -= total_mem;
+
+            return true;
+        }
+    }
+
+    return false;
+}
 
 // Count nodes already in use for a specific MD type
 int CountNodesForMD(const SearchState& state, int md_idx,
@@ -888,7 +1121,10 @@ vector<int> SelectTopMDsForPod(int pod_idx, const SearchState& state,
 
 // Try to place pod on existing node
 bool TryPlaceOnExistingNode(int pod_idx, int md_idx, SearchState& state,
-                            const MachineDeployment* mds, const Pod* pods) {
+                            const MachineDeployment* mds, const Pod* pods,
+                            const TopologyGroup* topology_groups,
+                            int num_topology_groups,
+                            const vector<int>& slot_offsets) {
     int best_slot = -1;
     double best_util = -1.0;
 
@@ -897,6 +1133,11 @@ bool TryPlaceOnExistingNode(int pod_idx, int md_idx, SearchState& state,
         if (state.slot_usage[md_idx][slot_idx].used) {
             if (pods[pod_idx].cpu <= state.slot_usage[md_idx][slot_idx].cpu_remaining &&
                 pods[pod_idx].memory <= state.slot_usage[md_idx][slot_idx].mem_remaining) {
+
+                if (!CanPlaceWithTopology(state, pod_idx, md_idx, slot_idx,
+                    topology_groups, num_topology_groups, slot_offsets)) {
+                    continue;
+                }
 
                 // Calculate utilization after placing
                 double cpu_util = 1.0 - ((state.slot_usage[md_idx][slot_idx].cpu_remaining - pods[pod_idx].cpu) / mds[md_idx].cpu);
@@ -916,6 +1157,8 @@ bool TryPlaceOnExistingNode(int pod_idx, int md_idx, SearchState& state,
         state.assignments[pod_idx] = {md_idx, best_slot};
         state.slot_usage[md_idx][best_slot].cpu_remaining -= pods[pod_idx].cpu;
         state.slot_usage[md_idx][best_slot].mem_remaining -= pods[pod_idx].memory;
+        ApplyTopologyPlacement(state, pod_idx, md_idx, best_slot,
+            topology_groups, num_topology_groups, slot_offsets);
         state.pods_placed++;
         return true;
     }
@@ -925,15 +1168,25 @@ bool TryPlaceOnExistingNode(int pod_idx, int md_idx, SearchState& state,
 
 // Try to place pod on new node
 bool TryPlaceOnNewNode(int pod_idx, int md_idx, SearchState& state,
-                      const MachineDeployment* mds, const Pod* pods) {
+                      const MachineDeployment* mds, const Pod* pods,
+                      const TopologyGroup* topology_groups,
+                      int num_topology_groups,
+                      const vector<int>& slot_offsets) {
     // Find first empty slot
     for (int slot_idx = 0; slot_idx < mds[md_idx].max_scale_out; ++slot_idx) {
         if (!state.slot_usage[md_idx][slot_idx].used) {
+            if (!CanPlaceWithTopology(state, pod_idx, md_idx, slot_idx,
+                topology_groups, num_topology_groups, slot_offsets)) {
+                continue;
+            }
+
             // Create new node
             state.assignments[pod_idx] = {md_idx, slot_idx};
             state.slot_usage[md_idx][slot_idx].used = true;
             state.slot_usage[md_idx][slot_idx].cpu_remaining -= pods[pod_idx].cpu;
             state.slot_usage[md_idx][slot_idx].mem_remaining -= pods[pod_idx].memory;
+            ApplyTopologyPlacement(state, pod_idx, md_idx, slot_idx,
+                topology_groups, num_topology_groups, slot_offsets);
             state.nodes_used++;
             state.pods_placed++;
             return true;
@@ -952,7 +1205,9 @@ BeamResult RunBeamSearch(
     const double* plugin_scores,
     const int* allowed_matrix,
     int beam_width = 3,
-    int md_candidates = 5
+    int md_candidates = 5,
+    const TopologyGroup* topology_groups = nullptr,
+    int num_topology_groups = 0
 ) {
     // Build affinity groups (pods that MUST be placed together)
     vector<vector<int>> affinity_groups = BuildAffinityGroups(pods, num_pods);
@@ -961,15 +1216,23 @@ BeamResult RunBeamSearch(
     vector<int> md_order = CalculateOptimalMDOrder(mds, num_mds, pods, num_pods,
                                                      plugin_scores, allowed_matrix);
 
+    vector<int> slot_offsets(num_mds, 0);
+    int slot_offset = 0;
+    for (int j = 0; j < num_mds; ++j) {
+        slot_offsets[j] = slot_offset;
+        slot_offset += mds[j].max_scale_out;
+    }
+
     // Initialize beam with empty state
     vector<SearchState> beam;
-    beam.push_back(SearchState(num_pods, num_mds, mds));
+    beam.push_back(SearchState(num_pods, num_mds, mds, topology_groups, num_topology_groups));
 
     // PHASE 1: Place affinity groups using best-fit strategy
     // (Beam search doesn't help here since affinity groups must be placed together)
     for (const auto& group : affinity_groups) {
         bool placed = TryPlaceAffinityGroup(group, md_order, mds, pods, allowed_matrix,
-                                           num_mds, beam[0].slot_usage, beam[0].assignments);
+                                           num_mds, beam[0], topology_groups,
+                                           num_topology_groups, slot_offsets);
         if (placed) {
             for (int pod_idx : group) {
                 if (beam[0].assignments[pod_idx].md != -1) {
@@ -1030,6 +1293,11 @@ BeamResult RunBeamSearch(
                     if (pods[pod_idx].cpu > state.slot_usage[md_idx][slot_idx].cpu_remaining ||
                         pods[pod_idx].memory > state.slot_usage[md_idx][slot_idx].mem_remaining) continue;
 
+                    if (!CanPlaceWithTopology(state, pod_idx, md_idx, slot_idx,
+                        topology_groups, num_topology_groups, slot_offsets)) {
+                        continue;
+                    }
+
                     // Score: prefer fuller nodes
                     double cpu_util = 1.0 - ((state.slot_usage[md_idx][slot_idx].cpu_remaining - pods[pod_idx].cpu) / mds[md_idx].cpu);
                     double mem_util = 1.0 - ((state.slot_usage[md_idx][slot_idx].mem_remaining - pods[pod_idx].memory) / mds[md_idx].memory);
@@ -1061,8 +1329,11 @@ BeamResult RunBeamSearch(
                     new_state.assignments[pod_idx] = {md_idx, slot_idx};
                     new_state.slot_usage[md_idx][slot_idx].cpu_remaining -= pods[pod_idx].cpu;
                     new_state.slot_usage[md_idx][slot_idx].mem_remaining -= pods[pod_idx].memory;
+                    ApplyTopologyPlacement(new_state, pod_idx, md_idx, slot_idx,
+                        topology_groups, num_topology_groups, slot_offsets);
                     new_state.pods_placed++;
-                    new_state.waste_score = new_state.CalculateWaste(mds, num_mds, plugin_scores);
+                    double topology_penalty = CalculateTopologySoftPenalty(new_state, topology_groups, num_topology_groups);
+                    new_state.waste_score = new_state.CalculateWaste(mds, num_mds, plugin_scores) + (topology_penalty * 250.0);
                     next_beam.push_back(new_state);
                 }
                 // debug << "used top " << limit << " existing" << std::endl;
@@ -1077,10 +1348,12 @@ BeamResult RunBeamSearch(
 
                 for (int md_idx : md_choices) {
                     SearchState new_state = state.Clone();
-                    bool placed = TryPlaceOnNewNode(pod_idx, md_idx, new_state, mds, pods);
+                    bool placed = TryPlaceOnNewNode(pod_idx, md_idx, new_state, mds, pods,
+                        topology_groups, num_topology_groups, slot_offsets);
 
                     if (placed) {
-                        new_state.waste_score = new_state.CalculateWaste(mds, num_mds, plugin_scores);
+                        double topology_penalty = CalculateTopologySoftPenalty(new_state, topology_groups, num_topology_groups);
+                        new_state.waste_score = new_state.CalculateWaste(mds, num_mds, plugin_scores) + (topology_penalty * 250.0);
                         next_beam.push_back(new_state);
                     }
                 }
@@ -1154,6 +1427,64 @@ BeamResult RunBeamSearch(
 }
 
 // Helper: Calculate solution cost (must match BuildCombinedObjective)
+double CalculateTopologySoftPenaltyForAssignments(
+    const vector<BeamAssignment>& assignments,
+    const MachineDeployment* mds,
+    int num_mds,
+    const Pod* pods,
+    int num_pods,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups
+) {
+    if (topology_groups == nullptr || num_topology_groups == 0) {
+        return 0.0;
+    }
+
+    vector<int> slot_offsets(num_mds, 0);
+    int slot_offset = 0;
+    for (int j = 0; j < num_mds; ++j) {
+        slot_offsets[j] = slot_offset;
+        slot_offset += mds[j].max_scale_out;
+    }
+
+    double penalty = 0.0;
+    for (int g = 0; g < num_topology_groups; ++g) {
+        const TopologyGroup& group = topology_groups[g];
+        if (group.is_hard || group.num_domains <= 0) {
+            continue;
+        }
+        if (group.pods_in_group == nullptr || group.slot_domains == nullptr) {
+            continue;
+        }
+
+        vector<int> counts(group.num_domains, 0);
+        if (group.baseline_counts != nullptr) {
+            for (int d = 0; d < group.num_domains; ++d) {
+                counts[d] = group.baseline_counts[d];
+            }
+        }
+
+        for (int i = 0; i < num_pods; ++i) {
+            if (!group.pods_in_group[i]) {
+                continue;
+            }
+            if (assignments[i].md < 0 || assignments[i].slot < 0) {
+                continue;
+            }
+            int slot_index = slot_offsets[assignments[i].md] + assignments[i].slot;
+            int domain = group.slot_domains[slot_index];
+            if (domain < 0 || domain >= group.num_domains) {
+                continue;
+            }
+            counts[domain]++;
+        }
+
+        penalty += CalculateTopologySoftPenaltyFromCounts(counts, group);
+    }
+
+    return penalty;
+}
+
 double CalculateSolutionCost(
     const vector<BeamAssignment>& assignments,
     const vector<vector<bool>>& slots_used,
@@ -1161,7 +1492,9 @@ double CalculateSolutionCost(
     int num_mds,
     const Pod* pods,
     int num_pods,
-    const double* plugin_scores
+    const double* plugin_scores,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups
 ) {
     double total_waste = 0.0;
     double plugin_cost = 0.0;
@@ -1245,11 +1578,15 @@ double CalculateSolutionCost(
         }
     }
 
+    // Calculate topology soft penalties (ScheduleAnyway)
+    double topology_penalty = CalculateTopologySoftPenaltyForAssignments(assignments, mds, num_mds, pods, num_pods,
+        topology_groups, num_topology_groups);
+
     // Combined objective (must match C++)
     int objective_scale = 1000;
     double total_cost = (total_waste * objective_scale) +
                        (plugin_cost * objective_scale) +
-                       (soft_affinity_penalty * 250);
+                       ((soft_affinity_penalty + topology_penalty) * 250);
 
     return total_cost;
 }
@@ -1316,7 +1653,9 @@ double CalculateCurrentStateCost(
     const Pod* pods,
     int num_pods,
     const double* plugin_scores,
-    const int* current_replicas  // Actual current replica count per MD
+    const int* current_replicas,  // Actual current replica count per MD
+    const TopologyGroup* topology_groups,
+    int num_topology_groups
 ) {
     // Build current assignments vector from pod current_md_assignment
     vector<BeamAssignment> current_assignments(num_pods);
@@ -1379,7 +1718,8 @@ double CalculateCurrentStateCost(
     }
 
     // Now calculate cost using the same method as CalculateSolutionCost
-    return CalculateSolutionCost(current_assignments, current_slots_used, mds, num_mds, pods, num_pods, plugin_scores);
+    return CalculateSolutionCost(current_assignments, current_slots_used, mds, num_mds, pods, num_pods, plugin_scores,
+        topology_groups, num_topology_groups);
 }
 
 // Structure for CP-SAT solver result
@@ -1400,6 +1740,8 @@ CPSATResult RunCPSATSolverAttempt(
     int num_pods,
     const double* plugin_scores,
     const int* allowed_matrix,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups,
     const int* hint,
     int timeout_secs
 ) {
@@ -1418,6 +1760,13 @@ CPSATResult RunCPSATSolverAttempt(
     auto slots_per_md = optimiser.GetSlotsPerMd();
     auto pod_slot_assignment = optimiser.GetPodSlotAssignment();
     auto slot_used = optimiser.GetSlotUsed();
+
+    vector<int> slot_offsets(num_mds, 0);
+    int total_slots = 0;
+    for (int j = 0; j < num_mds; ++j) {
+        slot_offsets[j] = total_slots;
+        total_slots += slots_per_md[j];
+    }
 
     // Add hard affinity constraints
     std::unordered_set<std::pair<int, int>> affinity_seen;
@@ -1438,6 +1787,100 @@ CPSATResult RunCPSATSolverAttempt(
                     } else {
                         model.AddBoolOr({pod_slot_assignment[i][j][k].Not(), pod_slot_assignment[other][j][k].Not()});
                     }
+                }
+            }
+        }
+    }
+
+    // Topology spread constraints
+    sat::LinearExpr topology_penalty;
+    const int topology_penalty_weight = 1000;
+    if (topology_groups != nullptr && num_topology_groups > 0) {
+        for (int g = 0; g < num_topology_groups; ++g) {
+            const TopologyGroup& group = topology_groups[g];
+            if (group.num_domains <= 0) {
+                continue;
+            }
+
+            int group_pod_count = 0;
+            int max_baseline = 0;
+            if (group.baseline_counts != nullptr) {
+                for (int d = 0; d < group.num_domains; ++d) {
+                    max_baseline = std::max(max_baseline, group.baseline_counts[d]);
+                }
+            }
+            if (group.pods_in_group != nullptr) {
+                for (int i = 0; i < num_pods; ++i) {
+                    if (group.pods_in_group[i]) {
+                        group_pod_count++;
+                    }
+                }
+            }
+
+            int max_bound = max_baseline + group_pod_count;
+            std::vector<sat::IntVar> domain_counts;
+            domain_counts.reserve(group.num_domains);
+
+            for (int d = 0; d < group.num_domains; ++d) {
+                int baseline = (group.baseline_counts != nullptr) ? group.baseline_counts[d] : 0;
+                int upper = baseline + group_pod_count;
+                sat::IntVar count = model.NewIntVar({0, upper});
+                sat::LinearExpr assign_sum;
+
+                if (group.pods_in_group != nullptr && group.slot_domains != nullptr) {
+                    for (int i = 0; i < num_pods; ++i) {
+                        if (!group.pods_in_group[i]) {
+                            continue;
+                        }
+                        for (int j = 0; j < num_mds; ++j) {
+                            if (!allowed_matrix[i * num_mds + j]) {
+                                continue;
+                            }
+                            int slots = slots_per_md[j];
+                            int offset = slot_offsets[j];
+                            for (int k = 0; k < slots; ++k) {
+                                int slot_index = offset + k;
+                                if (group.slot_domains[slot_index] != d) {
+                                    continue;
+                                }
+                                assign_sum += pod_slot_assignment[i][j][k];
+                            }
+                        }
+                    }
+                }
+
+                model.AddEquality(count, baseline + assign_sum);
+                domain_counts.push_back(count);
+            }
+
+            if (!domain_counts.empty()) {
+                sat::IntVar maxVar = model.NewIntVar({0, max_bound});
+                sat::IntVar minVar = model.NewIntVar({0, max_bound});
+                model.AddMaxEquality(maxVar, domain_counts);
+                model.AddMinEquality(minVar, domain_counts);
+
+                std::vector<sat::BoolVar> domain_used;
+                domain_used.reserve(domain_counts.size());
+                for (int d = 0; d < group.num_domains; ++d) {
+                    sat::BoolVar used = model.NewBoolVar();
+                    model.AddGreaterOrEqual(domain_counts[d], 1).OnlyEnforceIf(used);
+                    model.AddEquality(domain_counts[d], 0).OnlyEnforceIf(used.Not());
+                    domain_used.push_back(used);
+                }
+                sat::LinearExpr domains_used = sat::LinearExpr::Sum(domain_used);
+
+                if (group.is_hard) {
+                    model.AddLessOrEqual(maxVar - minVar, group.max_skew);
+                    model.AddGreaterOrEqual(domains_used, group.min_domains);
+                } else {
+                    sat::IntVar skew_slack = model.NewIntVar({0, max_bound});
+                    model.AddGreaterOrEqual(skew_slack, maxVar - minVar - group.max_skew);
+                    topology_penalty += skew_slack * topology_penalty_weight;
+
+                    int min_slack_bound = std::max(0, group.min_domains);
+                    sat::IntVar min_slack = model.NewIntVar({0, min_slack_bound});
+                    model.AddGreaterOrEqual(min_slack, group.min_domains - domains_used);
+                    topology_penalty += min_slack * topology_penalty_weight;
                 }
             }
         }
@@ -1501,6 +1944,7 @@ CPSATResult RunCPSATSolverAttempt(
     // Soft affinity penalties
     std::unordered_set<std::pair<int, int>> soft_seen;
     sat::LinearExpr total_penalty;
+    total_penalty += topology_penalty;
     for (int i = 0; i < num_pods; ++i) {
         const Pod& pod = pods[i];
         if (pod.soft_affinity_count == 0) continue;
@@ -1603,7 +2047,9 @@ SolverResult OptimisePlacement(
     const int* beam_search_hint_attempt,
     const bool* fallback_to_beam_search,
     const bool* beam_search_only,
-    const int* current_replicas  // Actual current replica count per MD (optional)
+    const int* current_replicas,  // Actual current replica count per MD (optional)
+    const TopologyGroup* topology_groups,
+    int num_topology_groups
 ) {
     // Initialize result
     SolverResult result = {false, 0.0, 0, 0.0, 0.0, false, false, false, 0, 0, 0};
@@ -1618,7 +2064,8 @@ SolverResult OptimisePlacement(
     double threshold = (improvement_threshold != nullptr) ? *improvement_threshold : 0.0;
 
     // Calculate current state cost
-    double current_state_cost = CalculateCurrentStateCost(mds, num_mds, pods, num_pods, plugin_scores, current_replicas);
+    double current_state_cost = CalculateCurrentStateCost(mds, num_mds, pods, num_pods, plugin_scores,
+        current_replicas, topology_groups, num_topology_groups);
     result.current_state_cost = current_state_cost;
 
     // Score-only mode: return current state cost without optimization
@@ -1654,7 +2101,8 @@ SolverResult OptimisePlacement(
     if (only_beam_search) {
         BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
                                                plugin_scores, allowed_matrix,
-                                               3, 3);  // beam_width=3, md_candidates=3
+                                               3, 3, topology_groups,
+                                               num_topology_groups);  // beam_width=3, md_candidates=3
 
         if (!beam_result.all_placed) {
             result.success = false;
@@ -1668,7 +2116,8 @@ SolverResult OptimisePlacement(
         double beam_score = CalculateSolutionCost(beam_result.assignments,
                                                   beam_result.slots_used,
                                                   mds, num_mds, pods, num_pods,
-                                                  plugin_scores);
+                                                  plugin_scores,
+                                                  topology_groups, num_topology_groups);
 
         // If current_state_cost is 0 or very small (pods unplaced), any valid placement is acceptable
         bool accept_solution = false;
@@ -1735,7 +2184,8 @@ SolverResult OptimisePlacement(
             // Generate beam search hint on specified attempt
             BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
                                                    plugin_scores, allowed_matrix,
-                                                   3, 3);  // beam_width=3, md_candidates=3
+                                                   3, 3, topology_groups,
+                                                   num_topology_groups);  // beam_width=3, md_candidates=3
             if (beam_result.all_placed) {
                 beam_hint_matrix = ConvertBeamToHintMatrix(beam_result, mds, num_mds, num_pods);
                 hint_to_use = beam_hint_matrix.data();
@@ -1747,6 +2197,7 @@ SolverResult OptimisePlacement(
         // Run CP-SAT solver
         CPSATResult cpsat_result = RunCPSATSolverAttempt(mds, num_mds, pods, num_pods,
                                                           plugin_scores, allowed_matrix,
+                                                          topology_groups, num_topology_groups,
                                                           hint_to_use, timeout);
 
         result.cpsat_attempts = attempt;
@@ -1756,7 +2207,8 @@ SolverResult OptimisePlacement(
             double score = CalculateSolutionCost(cpsat_result.assignments,
                                                  cpsat_result.slots_used,
                                                  mds, num_mds, pods, num_pods,
-                                                 plugin_scores);
+                                                 plugin_scores,
+                                                 topology_groups, num_topology_groups);
 
             // Track best solution
             if (score < best_score) {
@@ -1833,13 +2285,15 @@ SolverResult OptimisePlacement(
     if (do_fallback) {
         BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
                                                plugin_scores, allowed_matrix,
-                                               3, 3);  // beam_width=3, md_candidates=3
+                                               3, 3, topology_groups,
+                                               num_topology_groups);  // beam_width=3, md_candidates=3
 
         if (beam_result.all_placed) {
             double beam_score = CalculateSolutionCost(beam_result.assignments,
                                                       beam_result.slots_used,
                                                       mds, num_mds, pods, num_pods,
-                                                      plugin_scores);
+                                                      plugin_scores,
+                                                      topology_groups, num_topology_groups);
 
             // If current_state_cost is 0 or very small (pods unplaced), any valid placement is acceptable
             bool accept_solution = false;
@@ -1930,7 +2384,9 @@ SolverResult OptimisePlacementBeamSearch(
     int* out_slot_assignments,
     uint8_t* out_slots_used,
     const int* beam_width,        // Beam width (default: 3)
-    const int* md_candidates      // MD candidates per pod (default: 5)
+    const int* md_candidates,      // MD candidates per pod (default: 5)
+    const TopologyGroup* topology_groups,
+    int num_topology_groups
 ) {
     SolverResult result = {false, 0.0, 0, 0.0, 0.0, false, false, false, 0, 0, 0};
 
@@ -1949,7 +2405,8 @@ SolverResult OptimisePlacementBeamSearch(
     // Run beam search
     BeamResult beam_result = RunBeamSearch(mds, num_mds, pods, num_pods,
                                            plugin_scores, allowed_matrix,
-                                           width, candidates);
+                                           width, candidates,
+                                           topology_groups, num_topology_groups);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
@@ -1967,7 +2424,8 @@ SolverResult OptimisePlacementBeamSearch(
     double score = CalculateSolutionCost(beam_result.assignments,
                                          beam_result.slots_used,
                                          mds, num_mds, pods, num_pods,
-                                         plugin_scores);
+                                         plugin_scores,
+                                         topology_groups, num_topology_groups);
 
     // Copy result to output
     CopyBeamResultToOutput(beam_result, mds, num_mds, num_pods,

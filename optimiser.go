@@ -40,6 +40,16 @@ typedef struct {
 } Pod;
 
 typedef struct {
+    int max_skew;
+    int min_domains;
+    int num_domains;
+    const int* baseline_counts;
+    const int* pods_in_group;
+    const int* slot_domains;
+    int is_hard;
+} TopologyGroup;
+
+typedef struct {
     _Bool success;             // Whether a valid solution was found
     double objective;          // Objective value of the solution
     int status_code;           // Solver status (e.g., 2 = feasible)
@@ -71,7 +81,9 @@ SolverResult call_optimise_placement_with_handle(
     const int* beam_search_hint_attempt,
     const _Bool* fallback_to_beam_search,
     const _Bool* beam_search_only,
-    const int* current_replicas
+    const int* current_replicas,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups
 ) {
     // Get the function pointer using dlsym with the specific handle
     void* sym = dlsym(lib_handle, "OptimisePlacement");
@@ -101,7 +113,9 @@ SolverResult call_optimise_placement_with_handle(
         const int*,
         const _Bool*,
         const _Bool*,
-        const int*
+        const int*,
+        const TopologyGroup*,
+        int
     );
 
     OptimisePlacementFunc func = (OptimisePlacementFunc)sym;
@@ -111,7 +125,8 @@ SolverResult call_optimise_placement_with_handle(
                 allowed_matrix, initial_assignment, out_slot_assignments,
                 out_slots_used, max_runtime_secs, improvement_threshold, score_only,
                 max_attempts, use_beam_search_hint, beam_search_hint_attempt,
-                fallback_to_beam_search, beam_search_only, current_replicas);
+                fallback_to_beam_search, beam_search_only, current_replicas,
+                topology_groups, num_topology_groups);
 }
 
 // C wrapper function for beam search optimization
@@ -124,7 +139,9 @@ SolverResult call_optimise_placement_beam_search(
     int* out_slot_assignments,
     uint8_t* out_slots_used,
     const int* beam_width,
-    const int* md_candidates
+    const int* md_candidates,
+    const TopologyGroup* topology_groups,
+    int num_topology_groups
 ) {
     // Get the function pointer using dlsym with the specific handle
     void* sym = dlsym(lib_handle, "OptimisePlacementBeamSearch");
@@ -150,7 +167,9 @@ SolverResult call_optimise_placement_beam_search(
         int*,
         uint8_t*,
         const int*,
-        const int*
+        const int*,
+        const TopologyGroup*,
+        int
     );
 
     OptimisePlacementBeamSearchFunc func = (OptimisePlacementBeamSearchFunc)sym;
@@ -158,7 +177,7 @@ SolverResult call_optimise_placement_beam_search(
     // Call the function
     return func(mds, num_mds, pods, num_pods, plugin_scores,
                 allowed_matrix, out_slot_assignments, out_slots_used,
-                beam_width, md_candidates);
+                beam_width, md_candidates, topology_groups, num_topology_groups);
 }
 */
 import "C"
@@ -197,6 +216,19 @@ type HasSoftAffinity interface {
 	GetSoftAffinityWeights() []float64
 }
 
+type TopologyGroupInput struct {
+	MaxSkew        int
+	MinDomains     int
+	BaselineCounts []int
+	PodsInGroup    []int
+	SlotDomains    []int
+	IsHard         bool
+}
+
+type TopologySpreadInput struct {
+	Groups []TopologyGroupInput
+}
+
 type PodSlotAssignment struct {
 	MD   int
 	Slot int
@@ -217,6 +249,9 @@ type OptimizationConfig struct {
 	BeamSearchHintAttempt *int  // Which attempt to inject beam search hint (default: 2)
 	FallbackToBeamSearch  *bool // Use pure beam search if all CP-SAT attempts fail (default: false)
 	BeamSearchOnly        *bool // Skip CP-SAT entirely, only run beam search (default: false)
+
+	// Topology spread constraints (optional)
+	Topology *TopologySpreadInput
 }
 
 type Result struct {
@@ -439,6 +474,88 @@ func prepareOutputBuffers(numPods int, slotsPerMD []int) (*C.int, *C.uint8_t, in
 	return outAssign, outSlots, outSlotsUsedCount, cleanup
 }
 
+func validateTopologyInput(topology *TopologySpreadInput, numPods int, totalSlots int) error {
+	if topology == nil || len(topology.Groups) == 0 {
+		return nil
+	}
+	for idx, group := range topology.Groups {
+		if len(group.BaselineCounts) == 0 {
+			return fmt.Errorf("topology group %d has no domains", idx)
+		}
+		if len(group.PodsInGroup) != numPods {
+			return fmt.Errorf(
+				"topology group %d pods_in_group length %d does not match numPods %d",
+				idx,
+				len(group.PodsInGroup),
+				numPods,
+			)
+		}
+		if len(group.SlotDomains) != totalSlots {
+			return fmt.Errorf(
+				"topology group %d slot_domains length %d does not match totalSlots %d",
+				idx,
+				len(group.SlotDomains),
+				totalSlots,
+			)
+		}
+	}
+	return nil
+}
+
+func prepareTopologyInput(
+	topology *TopologySpreadInput,
+	numPods int,
+	totalSlots int,
+) (*C.TopologyGroup, C.int, func()) {
+	if topology == nil || len(topology.Groups) == 0 {
+		return nil, 0, func() {}
+	}
+
+	cGroups := (*C.TopologyGroup)(C.malloc(C.size_t(len(topology.Groups)) * C.size_t(unsafe.Sizeof(C.TopologyGroup{}))))
+	goGroups := (*[1 << 30]C.TopologyGroup)(unsafe.Pointer(cGroups))[:len(topology.Groups):len(topology.Groups)]
+	allocated := []unsafe.Pointer{unsafe.Pointer(cGroups)}
+	for i, group := range topology.Groups {
+		cBaseline := makeCIntSlice(group.BaselineCounts)
+		cPodsInGroup := makeCIntSlice(group.PodsInGroup)
+		cSlotDomains := makeCIntSlice(group.SlotDomains)
+
+		if cBaseline != nil {
+			allocated = append(allocated, unsafe.Pointer(cBaseline))
+		}
+		if cPodsInGroup != nil {
+			allocated = append(allocated, unsafe.Pointer(cPodsInGroup))
+		}
+		if cSlotDomains != nil {
+			allocated = append(allocated, unsafe.Pointer(cSlotDomains))
+		}
+
+		goGroups[i] = C.TopologyGroup{
+			max_skew:        C.int(group.MaxSkew),
+			min_domains:     C.int(group.MinDomains),
+			num_domains:     C.int(len(group.BaselineCounts)),
+			baseline_counts: cBaseline,
+			pods_in_group:   cPodsInGroup,
+			slot_domains:    cSlotDomains,
+			is_hard:         C.int(boolToInt(group.IsHard)),
+		}
+	}
+
+	cleanup := func() {
+		for _, ptr := range allocated {
+			C.free(ptr)
+		}
+	}
+
+	return cGroups, C.int(len(topology.Groups)), cleanup
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 func parseResults(
 	res C.SolverResult,
 	outAssign *C.int,
@@ -533,6 +650,7 @@ func OptimisePlacementRaw(
 	var beamSearchHintAttempt *int
 	var fallbackToBeamSearch *bool
 	var beamSearchOnly *bool
+	var topology *TopologySpreadInput
 
 	if config != nil {
 		maxRuntimeSeconds = config.MaxRuntimeSeconds
@@ -543,6 +661,7 @@ func OptimisePlacementRaw(
 		beamSearchHintAttempt = config.BeamSearchHintAttempt
 		fallbackToBeamSearch = config.FallbackToBeamSearch
 		beamSearchOnly = config.BeamSearchOnly
+		topology = config.Topology
 	}
 
 	numMDs := len(mds)
@@ -551,6 +670,15 @@ func OptimisePlacementRaw(
 		slotsPerMD[i] = md.GetMaxScaleOut()
 	}
 	numPods := len(pods)
+
+	totalSlots := 0
+	for _, slots := range slotsPerMD {
+		totalSlots += slots
+	}
+
+	if err := validateTopologyInput(topology, numPods, totalSlots); err != nil {
+		return Result{Succeeded: false, Message: err.Error()}
+	}
 
 	cMDs, _, cleanupMDs := convertMachineDeployments(mds)
 	defer cleanupMDs()
@@ -576,6 +704,9 @@ func OptimisePlacementRaw(
 
 	outAssign, outSlots, outSlotsUsedCount, cleanupOutput := prepareOutputBuffers(numPods, slotsPerMD)
 	defer cleanupOutput()
+
+	cTopologyGroups, cTopologyCount, cleanupTopology := prepareTopologyInput(topology, numPods, totalSlots)
+	defer cleanupTopology()
 
 	// Prepare optional boolean parameters
 	var cScoreOnly *C._Bool
@@ -680,6 +811,7 @@ func OptimisePlacementRaw(
 		cImprovementThreshold, cScoreOnly,
 		cMaxAttempts, cUseBeamSearchHint, cBeamSearchHintAttempt,
 		cFallbackToBeamSearch, cBeamSearchOnly, cCurrentReplicas,
+		cTopologyGroups, cTopologyCount,
 	)
 
 	return parseResults(res, outAssign, outSlots, numPods, slotsPerMD, outSlotsUsedCount)
@@ -726,6 +858,7 @@ func OptimisePlacement(
 type BeamSearchConfig struct {
 	BeamWidth    *int // Number of partial solutions to keep at each step (default: 3, max: 10)
 	MDCandidates *int // Number of MD types to try per pod (default: 5, max: 20)
+	Topology     *TopologySpreadInput
 }
 
 // OptimisePlacementBeamSearch runs beam search optimization
@@ -751,6 +884,15 @@ func OptimisePlacementBeamSearch(
 		slotsPerMD[i] = md.GetMaxScaleOut()
 	}
 	numPods := len(pods)
+
+	totalSlots := 0
+	for _, slots := range slotsPerMD {
+		totalSlots += slots
+	}
+
+	if err := validateTopologyInput(config.Topology, numPods, totalSlots); err != nil {
+		return Result{Succeeded: false, Message: err.Error()}
+	}
 
 	// Build C structures using existing helpers
 	cMDs, _, cleanupMDs := convertMachineDeployments(mds)
@@ -784,12 +926,11 @@ func OptimisePlacementBeamSearch(
 	cOutAssignments := (*C.int)(C.malloc(C.size_t(len(pods)*2) * C.size_t(unsafe.Sizeof(C.int(0)))))
 	defer C.free(unsafe.Pointer(cOutAssignments))
 
-	totalSlots := 0
-	for _, md := range mds {
-		totalSlots += md.GetMaxScaleOut()
-	}
 	cOutSlotsUsed := (*C.uint8_t)(C.malloc(C.size_t(totalSlots)))
 	defer C.free(unsafe.Pointer(cOutSlotsUsed))
+
+	cTopologyGroups, cTopologyCount, cleanupTopology := prepareTopologyInput(config.Topology, numPods, totalSlots)
+	defer cleanupTopology()
 
 	// Prepare beam search parameters
 	var cBeamWidth *C.int
@@ -819,6 +960,8 @@ func OptimisePlacementBeamSearch(
 			cOutSlotsUsed,
 			cBeamWidth,
 			cMDCandidates,
+			cTopologyGroups,
+			cTopologyCount,
 		)
 	} else {
 		return Result{

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	optimiser "github.com/wikoion/md-optimiser"
 )
 
@@ -915,4 +916,175 @@ func TestOptimisePlacementRaw_ReplicaCountOverflow(t *testing.T) {
 		"Error message should mention the overflow")
 	assert.Contains(t, result.Message, strconv.Itoa(math.MaxInt32),
 		"Error message should mention math.MaxInt32")
+}
+
+func TestOptimisePlacementRaw_TopologySpreadHostname(t *testing.T) {
+	mds := []optimiser.MachineDeployment{
+		newMockMD("md-host", 4.0, 8.0, 2),
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 1.0},
+		&mockPod{cpu: 1.0, memory: 1.0},
+	}
+
+	allowed := []int{1, 1}
+	scores := []float64{1.0}
+	initial := make([][][]int, 0)
+
+	group := optimiser.TopologyGroupInput{
+		MaxSkew:        1,
+		MinDomains:     1,
+		BaselineCounts: []int{0, 0},
+		PodsInGroup:    []int{1, 1},
+		SlotDomains:    []int{0, 1},
+		IsHard:         true,
+	}
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: optimiser.IntPtr(5),
+		Topology: &optimiser.TopologySpreadInput{
+			Groups: []optimiser.TopologyGroupInput{group},
+		},
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	require.True(t, result.Succeeded, "expected topology spread to be feasible")
+	require.Len(t, result.PodAssignments, 2)
+	assert.NotEqual(t, result.PodAssignments[0].Slot, result.PodAssignments[1].Slot)
+}
+
+func TestOptimisePlacementRaw_TopologySpreadMinDomains(t *testing.T) {
+	mds := []optimiser.MachineDeployment{
+		newMockMD("md-a", 4.0, 8.0, 1),
+		newMockMD("md-b", 4.0, 8.0, 1),
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 1.0},
+		&mockPod{cpu: 1.0, memory: 1.0},
+	}
+
+	allowed := []int{1, 1, 1, 1}
+	scores := []float64{1.0, 1.0}
+	initial := make([][][]int, 0)
+
+	group := optimiser.TopologyGroupInput{
+		MaxSkew:        1,
+		MinDomains:     2,
+		BaselineCounts: []int{0, 0},
+		PodsInGroup:    []int{1, 1},
+		SlotDomains:    []int{0, 1},
+		IsHard:         true,
+	}
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: optimiser.IntPtr(5),
+		Topology: &optimiser.TopologySpreadInput{
+			Groups: []optimiser.TopologyGroupInput{group},
+		},
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	require.True(t, result.Succeeded, "expected topology spread with minDomains to be feasible")
+	assignDomains := map[int]int{}
+	assignDomains[result.PodAssignments[0].MD]++
+	assignDomains[result.PodAssignments[1].MD]++
+	assert.Len(t, assignDomains, 2, "expected pods to use both domains")
+}
+
+func TestOptimisePlacementRaw_TopologySpreadBaselineCounts(t *testing.T) {
+	mds := []optimiser.MachineDeployment{
+		newMockMD("md-a", 4.0, 8.0, 1),
+		newMockMD("md-b", 4.0, 8.0, 1),
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 1.0},
+	}
+
+	allowed := []int{1, 1}
+	scores := []float64{1.0, 1.0}
+	initial := make([][][]int, 0)
+
+	group := optimiser.TopologyGroupInput{
+		MaxSkew:        1,
+		MinDomains:     1,
+		BaselineCounts: []int{2, 0},
+		PodsInGroup:    []int{1},
+		SlotDomains:    []int{0, 1},
+		IsHard:         true,
+	}
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: optimiser.IntPtr(5),
+		Topology: &optimiser.TopologySpreadInput{
+			Groups: []optimiser.TopologyGroupInput{group},
+		},
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	require.True(t, result.Succeeded, "expected baseline-aware spread to be feasible")
+	assert.Equal(t, 1, result.PodAssignments[0].MD, "expected placement in domain with lower baseline count")
+}
+
+func TestOptimisePlacementRaw_TopologySpreadBeamSearchRejects(t *testing.T) {
+	mds := []optimiser.MachineDeployment{
+		newMockMD("md-a", 4.0, 8.0, 1),
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 1.0},
+	}
+
+	allowed := []int{1}
+	scores := []float64{1.0}
+	initial := make([][][]int, 0)
+
+	group := optimiser.TopologyGroupInput{
+		MaxSkew:        1,
+		MinDomains:     2,
+		BaselineCounts: []int{0},
+		PodsInGroup:    []int{1},
+		SlotDomains:    []int{0},
+		IsHard:         true,
+	}
+	config := &optimiser.OptimizationConfig{
+		BeamSearchOnly: optimiser.BoolPtr(true),
+		Topology: &optimiser.TopologySpreadInput{
+			Groups: []optimiser.TopologyGroupInput{group},
+		},
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	assert.False(t, result.Succeeded, "expected beam search to fail for infeasible minDomains")
+}
+
+func TestOptimisePlacementRaw_TopologySpreadScheduleAnywaySoft(t *testing.T) {
+	mds := []optimiser.MachineDeployment{
+		newMockMD("md-a", 4.0, 8.0, 1),
+	}
+
+	pods := []optimiser.Pod{
+		&mockPod{cpu: 1.0, memory: 1.0},
+	}
+
+	allowed := []int{1}
+	scores := []float64{1.0}
+	initial := make([][][]int, 0)
+
+	group := optimiser.TopologyGroupInput{
+		MaxSkew:        1,
+		MinDomains:     2,
+		BaselineCounts: []int{0},
+		PodsInGroup:    []int{1},
+		SlotDomains:    []int{0},
+		IsHard:         false,
+	}
+	config := &optimiser.OptimizationConfig{
+		MaxRuntimeSeconds: optimiser.IntPtr(5),
+		Topology: &optimiser.TopologySpreadInput{
+			Groups: []optimiser.TopologyGroupInput{group},
+		},
+	}
+
+	result := optimiser.OptimisePlacementRaw(mds, pods, scores, allowed, initial, config)
+	assert.True(t, result.Succeeded, "expected ScheduleAnyway spread to be soft")
 }

@@ -483,16 +483,30 @@ func validateTopologyInput(topology *TopologySpreadInput, numPods int, totalSlot
 			return fmt.Errorf("topology group %d has no domains", idx)
 		}
 		if len(group.PodsInGroup) != numPods {
-			return fmt.Errorf("topology group %d pods_in_group length %d does not match numPods %d", idx, len(group.PodsInGroup), numPods)
+			return fmt.Errorf(
+				"topology group %d pods_in_group length %d does not match numPods %d",
+				idx,
+				len(group.PodsInGroup),
+				numPods,
+			)
 		}
 		if len(group.SlotDomains) != totalSlots {
-			return fmt.Errorf("topology group %d slot_domains length %d does not match totalSlots %d", idx, len(group.SlotDomains), totalSlots)
+			return fmt.Errorf(
+				"topology group %d slot_domains length %d does not match totalSlots %d",
+				idx,
+				len(group.SlotDomains),
+				totalSlots,
+			)
 		}
 	}
 	return nil
 }
 
-func prepareTopologyInput(topology *TopologySpreadInput, numPods int, totalSlots int) (*C.TopologyGroup, C.int, func()) {
+func prepareTopologyInput(
+	topology *TopologySpreadInput,
+	numPods int,
+	totalSlots int,
+) (*C.TopologyGroup, C.int, func()) {
 	if topology == nil || len(topology.Groups) == 0 {
 		return nil, 0, func() {}
 	}

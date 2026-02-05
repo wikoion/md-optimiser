@@ -1914,6 +1914,9 @@ CPSATResult RunCPSATSolverAttempt(
     }
 
     // Resource constraints and slot tracking
+    // Use ceil for pod resources and 2% buffer on capacity to prevent floating-point
+    // truncation from causing overcommit (e.g., 27.82 GiB fitting into 27.81 GiB capacity)
+    constexpr double kCapacityBuffer = 0.98;  // 2% buffer
     for (int j = 0; j < num_mds; ++j) {
         int slots = slots_per_md[j];
         sat::LinearExpr used_sum;
@@ -1921,12 +1924,12 @@ CPSATResult RunCPSATSolverAttempt(
             sat::LinearExpr cpu_sum, mem_sum, assigned;
             for (int i = 0; i < num_pods; ++i) {
                 if (!allowed_matrix[i * num_mds + j]) continue;
-                cpu_sum += pod_slot_assignment[i][j][k] * static_cast<int>(pods[i].cpu * 100);
-                mem_sum += pod_slot_assignment[i][j][k] * static_cast<int>(pods[i].memory * 100);
+                cpu_sum += pod_slot_assignment[i][j][k] * static_cast<int>(std::ceil(pods[i].cpu * 100));
+                mem_sum += pod_slot_assignment[i][j][k] * static_cast<int>(std::ceil(pods[i].memory * 100));
                 assigned += pod_slot_assignment[i][j][k];
             }
-            model.AddLessOrEqual(cpu_sum, static_cast<int>(mds[j].cpu * 100));
-            model.AddLessOrEqual(mem_sum, static_cast<int>(mds[j].memory * 100));
+            model.AddLessOrEqual(cpu_sum, static_cast<int>(mds[j].cpu * 100 * kCapacityBuffer));
+            model.AddLessOrEqual(mem_sum, static_cast<int>(mds[j].memory * 100 * kCapacityBuffer));
             model.AddGreaterThan(assigned, 0).OnlyEnforceIf(slot_used[j][k]);
             model.AddEquality(assigned, 0).OnlyEnforceIf(slot_used[j][k].Not());
             used_sum += slot_used[j][k];
